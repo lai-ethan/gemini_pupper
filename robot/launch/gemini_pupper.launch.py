@@ -2,6 +2,7 @@
 
 Includes the course's neural_controller launch (walking policies, camera, joystick
 e-stop) exactly as pupper_gait_deploy installs it, and adds:
+  - Lab 5's fixed white balance on the course's camera node (camera_white_balance)
   - cmd_vel_mux, so the joystick, Gemini and the person follower share /cmd_vel
   - the person follower: your Lab 5 follow-me (follow_me_pupper/robot/follow_service.py)
     when that repo is on the robot, else the monorepo's simple follower
@@ -75,6 +76,22 @@ def gemini_controllers():
     return [ExecuteProcess(cmd=["python3", "-u", str(spawn), str(TRICK_PARAMS), *params], output="both")]
 
 
+def camera_white_balance():
+    """Lab 5's fixed white balance (robot/camera_params.yaml) on the course's camera node.
+
+    With auto white balance this camera comes out pink indoors. The course launch
+    starts the camera node with its own parameters, so the gains are set once the
+    node is up, the same libcamera controls follow_me.launch.py starts it with.
+    """
+    wb = yaml.safe_load((HERE.parent / "camera_params.yaml").read_text()).get("white_balance", {})
+    if wb.get("awb_enable", True):
+        return []
+    red, blue = (float(g) for g in wb["colour_gains"])
+    script = ("until ros2 param set /camera AwbEnable false; do sleep 2; done; "
+              f"ros2 param set /camera ColourGains '[{red}, {blue}]'")
+    return [ExecuteProcess(cmd=["bash", "-c", script], output="both")]
+
+
 def person_follower():
     """The follower behind activate/deactivate_person_following.
 
@@ -119,6 +136,7 @@ def generate_launch_description():
         Node(package="cmd_vel_mux", executable="cmd_vel_mux_node", parameters=[PARAMS], output="both"),
         Node(package="topic_tools", executable="throttle", name="joint_state_throttler",
              parameters=[PARAMS], arguments=["messages"], output="both"),
+        *camera_white_balance(),
         *person_follower(),
         *gemini_controllers(),
     ])

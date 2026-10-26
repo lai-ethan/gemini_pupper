@@ -21,6 +21,8 @@ import subprocess
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import cv2
+import numpy as np
 import psutil
 import uvicorn
 from fastapi import Body, FastAPI, HTTPException, Response, WebSocket, WebSocketDisconnect
@@ -29,6 +31,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 import tool_registry as gemini_tools
+from fisheye_converter import equirect_height, fisheye_to_equirectangular, load_camera_model
 from robot_api import LIMITS, Robot
 
 behaviors = gemini_tools.load_lab()  # lab/: every tool, and the behaviors they call
@@ -249,6 +252,30 @@ def limits():
 
 
 # ------------------------------------------------------------------ sensing
+# What Gemini sees: the fisheye frame undistorted to an equirectangular view, as
+# Lab 5 hands the person detector (same lens model, FOV and 700-pixel width), so
+# people look like people instead of bending around the edge of the lens.
+CAMERA_PARAMS = Path(__file__).resolve().parent / "camera_params.yaml"
+EQUIRECT_WIDTH = 700
+EQUIRECT_FOV_DEG = 220.0
+camera_model = None
+
+
+def undistort_jpeg(data: bytes) -> bytes | None:
+    global camera_model
+    frame = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
+    if frame is None:
+        return None
+    h, w = frame.shape[:2]
+    if camera_model is None or (camera_model.width, camera_model.height) != (w, h):
+        camera_model = load_camera_model(CAMERA_PARAMS, w, h)
+    equirect = fisheye_to_equirectangular(frame, camera_model, EQUIRECT_WIDTH,
+                                          equirect_height(EQUIRECT_WIDTH, EQUIRECT_FOV_DEG),
+                                          h_fov_deg=EQUIRECT_FOV_DEG)
+    ok, jpeg = cv2.imencode(".jpg", equirect, [cv2.IMWRITE_JPEG_QUALITY, 85])
+    return jpeg.tobytes() if ok else None
+
+
 @app.get("/camera/image")
 def camera_image():
     try:
@@ -256,7 +283,10 @@ def camera_image():
     except Exception:
         return Response(status_code=503, content="no camera frame yet")
     T().latest_image.put_nowait(msg)  # keep it for the next poll
-    return Response(content=bytes(msg.data), media_type="image/jpeg")
+    jpeg = undistort_jpeg(bytes(msg.data))
+    if jpeg is None:
+        return Response(status_code=503, content="could not decode the camera frame")
+    return Response(content=jpeg, media_type="image/jpeg")
 
 
 @app.websocket("/ws/detections")
