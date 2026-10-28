@@ -16,6 +16,8 @@ from part3_follow import prepare_to_move
 from robot_api import FELL_MESSAGE, LIMITS, LLM_CMD_RATE, LOCOMOTION, LOCOMOTION_CONTROLLER, MoveLimits, Result, Robot, not_written, with_note  # noqa: F401
 from tool_registry import Param, tool
 
+from operator import attrgetter # for limit depacking
+
 # "Run" means at least this fast, in m/s (the locomotion policy switches to its
 # running gait above about 0.5 m/s).
 RUN_MIN_SPEED = 1.0
@@ -59,7 +61,25 @@ def check_move(vx: float, vy: float, wz_deg: float, duration: float, limits: Mov
     # 3. The duration must be more than 0 and at most limits.duration_max.
     # 4. Too far: speed * duration > limits.distance_max, where speed = (vx**2 + vy**2) ** 0.5.
     # 5. Nothing wrong: return None.
-    return "TODO 2 is not written yet (check_move in lab/part2_walk.py)"
+
+    vx_min, vy_min, wz_min, vx_max, vy_max, wz_max, duration_max, distance_max = attrgetter('vx_min', 'vy_min', 'wz_min', 'vx_max', 'vy_max', 'wz_max', 'duration_max', 'distance_max')(limits)
+    vx = abs(vx)
+    vy = abs(vy)
+    wz_deg = abs(wz_deg)
+
+    if (vx < vx_min and vy < vy_min and wz_deg < wz_min): 
+        return f"too slow: |vx|>={vx_min} m/s or |vy|>={vy_min} m/s or |wz_deg|>={wz_min} deg/s"
+    if (vx > vx_max or vy > vy_max or wz_deg > wz_max):
+        return f"too fast: |vx|<={vx_max} m/s and |vy|<={vy_max} m/s and |wz_deg|<={wz_max} deg/s"
+    if (duration <= 0 or duration > duration_max):
+        return f"invalid duration: duration > 0 and <= {duration_max}"
+
+    speed = (vx**2 + vy**2) ** 0.5
+    distance = speed * duration
+    if (distance > distance_max):
+        return f"too far: (speed * duration) <= {distance_max} where speed = (vx**2 + vy**2) ** 0.5"
+
+    return None
     # ====================================
 
 
@@ -141,9 +161,10 @@ async def walk(robot: Robot, vx: float, vy: float, wz_deg: float, duration: floa
 # ========== TODO 3: YOUR CODE HERE ==========
 @tool(
     "turn",
-    "TODO 3: describe the turn tool for Gemini.",
-    direction=Param("string", "TODO 3", enum=["left", "right"]),
-    angle=Param("number", "TODO 3", required=False),
+    f"Turn in place. Use when the user says 'turn left' etc. 
+    Turning speed defaults to {robot.speeds().turn}deg/s" + PREPARES_MOVE,
+    direction=Param("string", "the direction on where to turn (left or right). Turning left is positive and right is negative", enum=["left", "right"]),
+    angle=Param("number", "By how far to turn in degrees. 90 degrees is a square’s corner, 120 degrees is a triangles", required=False),
 )
 async def turn_tool(robot: Robot, direction: str, angle: float = 90.0) -> Result:
     # Turn in place: no forward or sideways speed, just a turning speed, for as long
@@ -154,16 +175,26 @@ async def turn_tool(robot: Robot, direction: str, angle: float = 90.0) -> Result
     # 2. How long it takes: seconds = abs(angle) / turn_speed
     #    (90 degrees at 60 deg/s takes 1.5 s)
     # 3. return await walk(robot, 0.0, 0.0, wz_deg, seconds)
-    return not_written("TODO 3", "turn in lab/part2_walk.py")
+    turn_speed = robot.speeds().turn 
+    if direction == "left":
+        wz_deg = angle
+    elif direction == "right":
+        wz_deg = -angle
+    seconds = abs(angle) / turn_speed
+    return await walk(robot, 0.0, 0.0, wz_deg, seconds)
 
 
 @tool(
     "move",
-    "TODO 3: describe the move tool for Gemini.",
-    direction=Param("string", "TODO 3", enum=["forward", "backward", "left", "right"]),
-    run=Param("boolean", "TODO 3", required=False),
-    speed=Param("number", "TODO 3", required=False),
-    duration=Param("number", "TODO 3", required=False),
+    f"Moves pupper by calling walk. use when the user says walk forward, walk in a square, etc. Here are
+    the limits on speed and duration: vx_min: {LIMITS.vx_min}m/s, vx_max: {LIMITS.vx_max}m/s, vy_min: {LIMITS.vy_min}m/s,
+    vy_max: {LIMITS.vy_max}m/s, wz_min: {LIMITS.wz_min}deg/s, wz_max: {LIMITS.wz_max}deg/s, duration_max: {LIMITS.duration_max}s, duration_min: 0s, 
+    distance_max: {LIMITS.distance_max}m. You should never exceed the max limitations, and ideally be over the minimum limitations." + PREPARES_MOVE,
+    direction=Param("string", "To move forward, backware, left, or right", enum=["forward", "backward", "left", "right"]),
+    run=Param("boolean", f"Whether to run or not. Running speed minimum is {RUN_MIN_SPEED}m/s and defaults
+              to {RUN_DEFAULT_SPEED}m/s. This parameter Defaults to false", required=False),
+    speed=Param("number", f"How fast to move in seconds. Defaults to 0.4m/s if False.", required=False),
+    duration=Param("number", "how long to walk in seconds. Defaults to false. Distance = speed x duration: 2 m at 0.4 m/s is 5 s", required=False),
 )
 async def move_tool(
     robot: Robot,
