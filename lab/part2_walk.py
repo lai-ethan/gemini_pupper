@@ -161,8 +161,7 @@ async def walk(robot: Robot, vx: float, vy: float, wz_deg: float, duration: floa
 # ========== TODO 3: YOUR CODE HERE ==========
 @tool(
     "turn",
-    f"Turn in place. Use when the user says 'turn left' etc. 
-    Turning speed defaults to {robot.speeds().turn}deg/s" + PREPARES_MOVE,
+    f"Turn in place. Use when the user says 'turn left' etc." + PREPARES_MOVE,
     direction=Param("string", "the direction on where to turn (left or right). Turning left is positive and right is negative", enum=["left", "right"]),
     angle=Param("number", "By how far to turn in degrees. 90 degrees is a square’s corner, 120 degrees is a triangles", required=False),
 )
@@ -177,22 +176,20 @@ async def turn_tool(robot: Robot, direction: str, angle: float = 90.0) -> Result
     # 3. return await walk(robot, 0.0, 0.0, wz_deg, seconds)
     turn_speed = robot.speeds().turn 
     if direction == "left":
-        wz_deg = angle
+        wz_deg = turn_speed
     elif direction == "right":
-        wz_deg = -angle
+        wz_deg = -turn_speed
+    else:
+        wz_deg = None
     seconds = abs(angle) / turn_speed
     return await walk(robot, 0.0, 0.0, wz_deg, seconds)
 
 
 @tool(
     "move",
-    f"Moves pupper by calling walk. use when the user says walk forward, walk in a square, etc. Here are
-    the limits on speed and duration: vx_min: {LIMITS.vx_min}m/s, vx_max: {LIMITS.vx_max}m/s, vy_min: {LIMITS.vy_min}m/s,
-    vy_max: {LIMITS.vy_max}m/s, wz_min: {LIMITS.wz_min}deg/s, wz_max: {LIMITS.wz_max}deg/s, duration_max: {LIMITS.duration_max}s, duration_min: 0s, 
-    distance_max: {LIMITS.distance_max}m. You should never exceed the max limitations, and ideally be over the minimum limitations." + PREPARES_MOVE,
+    f"Moves pupper by calling walk. use when the user says walk forward, walk in a square, etc. Here are the limits on speed and duration: vx_min: {LIMITS.vx_min}m/s, vx_max: {LIMITS.vx_max}m/s, vy_min: {LIMITS.vy_min}m/s, vy_max: {LIMITS.vy_max}m/s, wz_min: {LIMITS.wz_min}deg/s, wz_max: {LIMITS.wz_max}deg/s, duration_max: {LIMITS.duration_max}s, duration_min: 0s,  distance_max: {LIMITS.distance_max}m. You should never exceed the max limitations, and ideally be over the minimum limitations." + PREPARES_MOVE,
     direction=Param("string", "To move forward, backware, left, or right", enum=["forward", "backward", "left", "right"]),
-    run=Param("boolean", f"Whether to run or not. Running speed minimum is {RUN_MIN_SPEED}m/s and defaults
-              to {RUN_DEFAULT_SPEED}m/s. This parameter Defaults to false", required=False),
+    run=Param("boolean", f"Whether to run or not. Running speed minimum is {RUN_MIN_SPEED}m/s and defaults to {RUN_DEFAULT_SPEED}m/s. This parameter Defaults to false", required=False),
     speed=Param("number", f"How fast to move in seconds. Defaults to 0.4m/s if False.", required=False),
     duration=Param("number", "how long to walk in seconds. Defaults to false. Distance = speed x duration: 2 m at 0.4 m/s is 5 s", required=False),
 )
@@ -220,7 +217,39 @@ async def move_tool(
     #      return with_note(note, await walk(robot, vx, vy, 0.0, duration))
     # Examples: move("forward") -> vx 0.4 | move("backward", run=True) -> vx -1.2 |
     #   move("forward", run=True, speed=0.6) -> vx 1.0 | move("right", run=True) -> vy -0.4
-    return not_written("TODO 3", "move in lab/part2_walk.py")
+    if run and (direction == "forward" or direction == "backward"):
+        if speed is not None:
+            speed = max(speed, RUN_MIN_SPEED)
+        else:
+            speed = RUN_DEFAULT_SPEED
+    else:
+        if speed is None:
+            speed = 0.4
+
+    if direction == "forward":
+        vx = speed
+        vy = 0
+    elif direction == "backward":
+        vx = -speed
+        vy = 0
+    elif direction == "left":
+        vx = 0
+        vy = speed
+    elif direction == "right":
+        vx = 0
+        vy = -speed
+
+    note = ""
+    note = "Sideways never runs; walking instead." if (run and (direction == "left" or direction == "right")) else note
+    if run and speed < 1:
+        note += "Running speed must be at least 1 m/s" 
+
+    result = check_move(vx, vy, 0.0, duration=duration)
+    if result is not None:
+        return with_note(result)
+
+    return with_note(note, await walk(robot, vx, vy, 0.0, duration))
+        
 # ====================================
 
 
