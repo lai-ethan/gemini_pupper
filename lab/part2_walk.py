@@ -311,6 +311,36 @@ async def arc_tool(
     radius: float = 0.5,
     speed: float | None = None,
 ) -> Result:
+    if speed is None:
+        speed = robot.speeds().walk
+
+    # 1. No circle to follow
+    if radius < 0:
+        return Result(False, f"no arc: radius {radius:g} m is negative; radius must be 0 m or more")
+    if speed <= 0:
+        return Result(False, f"no arc: speed {speed:g} m/s must be more than 0")
+
+    if radius == 0:
+        turn_speed = robot.speeds().turn
+        wz_deg = turn_speed if direction == "left" else -turn_speed
+        seconds = abs(angle) / turn_speed
+        return with_note("Radius 0: turned in place (a sharp corner). ",
+                     await walk(robot, 0.0, 0.0, wz_deg, seconds))
+
+    # 2. Too tight
+    wz_max = robot.speeds().limits.wz_max
+    if math.degrees(speed / radius) > wz_max:
+        smallest = math.ceil(speed / math.radians(wz_max) * 100) / 100
+        return Result(False, f"too tight: at {speed:g} m/s the radius must be at least {smallest} m")
+
+    # 3
+    wz_deg = math.degrees(speed / radius) if direction == "left" else - math.degrees(speed / radius)
+
+    # 4
+    seconds = abs(angle) / abs(wz_deg)
+
+    # 5
+    return await walk(robot, speed, 0.0, wz_deg, seconds)
     # speed is None when Gemini gave none: use robot.speeds().walk (0.4 m/s walking).
     # 1. No circle to follow: if radius < 0 or speed <= 0, return Result(False, ...)
     #    saying which, and what works: "radius must be 0 m or more".
