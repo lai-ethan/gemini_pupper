@@ -67,17 +67,24 @@ def check_move(vx: float, vy: float, wz_deg: float, duration: float, limits: Mov
     vy = abs(vy)
     wz_deg = abs(wz_deg)
 
-    if (vx < vx_min and vy < vy_min and wz_deg < wz_min): 
-        return f"too slow: |vx|>={vx_min} m/s or |vy|>={vy_min} m/s or |wz_deg|>={wz_min} deg/s"
+    # Gemini reads these word for word: say what was asked, the limit (with units), and the fix.
+    if (vx < vx_min and vy < vy_min and wz_deg < wz_min):
+        return (f"too slow to move at all: walk at least {vx_min} m/s forward or backward,"
+                f" {vy_min} m/s sideways, or turn at least {wz_min} deg/s")
     if (vx > vx_max or vy > vy_max or wz_deg > wz_max):
-        return f"too fast: |vx|<={vx_max} m/s and |vy|<={vy_max} m/s and |wz_deg|<={wz_max} deg/s"
+        over = [f"{name} {value:g} {unit} (max {limit})" for name, value, limit, unit in
+                (("forward/backward", vx, vx_max, "m/s"), ("sideways", vy, vy_max, "m/s"), ("turning", wz_deg, wz_max, "deg/s"))
+                if value > limit]
+        return (f"too fast: {', '.join(over)}. Limits are |vx|<={vx_max} m/s,"
+                f" |vy|<={vy_max} m/s and |wz|<={wz_max} deg/s")
     if (duration <= 0 or duration > duration_max):
-        return f"invalid duration: duration > 0 and <= {duration_max}"
+        return f"bad duration {duration:g} s: a move must last more than 0 s and at most {duration_max} s"
 
     speed = (vx**2 + vy**2) ** 0.5
     distance = speed * duration
     if (distance > distance_max):
-        return f"too far: (speed * duration) <= {distance_max} where speed = (vx**2 + vy**2) ** 0.5"
+        return (f"that would travel {distance:.2f} m, more than {distance_max} m in one move:"
+                f" split it into shorter moves")
 
     return None
     # ====================================
@@ -162,8 +169,8 @@ async def walk(robot: Robot, vx: float, vy: float, wz_deg: float, duration: floa
 @tool(
     "turn",
     f"Turn in place. Use when the user says 'turn left' etc." + PREPARES_MOVE,
-    direction=Param("string", "the direction on where to turn (left or right). Turning left is positive and right is negative", enum=["left", "right"]),
-    angle=Param("number", "By how far to turn in degrees. 90 degrees is a square’s corner, 120 degrees is a triangles", required=False),
+    direction=Param("string", "Which way to turn: left (counter-clockwise) or right (clockwise).", enum=["left", "right"]),
+    angle=Param("number", "How far to turn, in degrees, default 90: 90 is a square's corner, 120 a triangle's, 360 a full turn.", required=False),
 )
 async def turn_tool(robot: Robot, direction: str, angle: float = 90.0) -> Result:
     # Turn in place: no forward or sideways speed, just a turning speed, for as long
@@ -188,10 +195,10 @@ async def turn_tool(robot: Robot, direction: str, angle: float = 90.0) -> Result
 @tool(
     "move",
     f"Moves pupper by calling walk. use when the user says walk forward, walk in a square, etc. Here are the limits on speed and duration: vx_min: {LIMITS.vx_min}m/s, vx_max: {LIMITS.vx_max}m/s, vy_min: {LIMITS.vy_min}m/s, vy_max: {LIMITS.vy_max}m/s, wz_min: {LIMITS.wz_min}deg/s, wz_max: {LIMITS.wz_max}deg/s, duration_max: {LIMITS.duration_max}s, duration_min: 0s,  distance_max: {LIMITS.distance_max}m. You should never exceed the max limitations, and ideally be over the minimum limitations." + PREPARES_MOVE,
-    direction=Param("string", "To move forward, backware, left, or right", enum=["forward", "backward", "left", "right"]),
-    run=Param("boolean", f"Whether to run or not. Running speed minimum is {RUN_MIN_SPEED}m/s and defaults to {RUN_DEFAULT_SPEED}m/s. This parameter Defaults to false", required=False),
-    speed=Param("number", f"How fast to move in seconds. Defaults to 0.4m/s if False.", required=False),
-    duration=Param("number", "how long to walk in seconds. Defaults to false. Distance = speed x duration: 2 m at 0.4 m/s is 5 s", required=False),
+    direction=Param("string", "Which way to move: forward, backward, or left/right (a sidestep).", enum=["forward", "backward", "left", "right"]),
+    run=Param("boolean", f"true to run, default false. Only forward or backward: at least {RUN_MIN_SPEED} m/s, {RUN_DEFAULT_SPEED} m/s if no speed is given. Sideways moves always walk.", required=False),
+    speed=Param("number", f"How fast to move, in m/s: {LIMITS.vx_min} to {LIMITS.vx_max} forward or backward, {LIMITS.vy_min} to {LIMITS.vy_max} sideways (less in a walking trick like the spider). Default: the walking speed, 0.4 m/s.", required=False),
+    duration=Param("number", "How long to move in seconds, default 1.5. Distance = speed x duration: 2 m at 0.4 m/s is 5 s.", required=False),
 )
 async def move_tool(
     robot: Robot,
@@ -224,7 +231,7 @@ async def move_tool(
             speed = RUN_DEFAULT_SPEED
     else:
         if speed is None:
-            speed = 0.4
+            speed = robot.speeds().walk  # 0.4 m/s walking; a walking trick (the spider) has its own
 
     if direction == "forward":
         vx = speed
@@ -239,15 +246,9 @@ async def move_tool(
         vx = 0
         vy = -speed
 
-    note = ""
-    note = "Sideways never runs; walking instead." if (run and (direction == "left" or direction == "right")) else note
-    if run and speed < 1:
-        note += "Running speed must be at least 1 m/s" 
-
-    result = check_move(vx, vy, 0.0, duration=duration)
-    if result is not None:
-        return with_note(result)
-
+    note = "Sideways never runs; walking instead." if (run and direction in ("left", "right")) else ""
+    # walk() runs check_move with the limits of the state Pupper is in (locomotion, or a
+    # walking trick like the spider), and returns its refusal as a failure.
     return with_note(note, await walk(robot, vx, vy, 0.0, duration))
         
 # ====================================
@@ -298,11 +299,17 @@ async def move_tool(
 # ========== TODO 4: YOUR CODE HERE ==========
 @tool(
     "arc",
-    "TODO 4: describe the arc tool for Gemini.",
-    direction=Param("string", "TODO 4", enum=["left", "right"]),
-    angle=Param("number", "TODO 4"),
-    radius=Param("number", "TODO 4", required=False),
-    speed=Param("number", "TODO 4", required=False),
+    "Walk forward and turn at the same time, along part of a circle: curves, circles and"
+    " rounded shapes in one call (a full circle is angle 360). Radius 0 is a sharp corner:"
+    " Pupper turns in place, so a square is four moves with arc(radius=0) or turn between"
+    f" them. Pupper turns at most {LIMITS.wz_max} deg/s, so at speed v m/s the radius must"
+    f" be at least v / {math.radians(LIMITS.wz_max):.2f} m (about 0.2 m at the default"
+    f" walking speed); a tighter arc is refused with the smallest radius that works."
+    f" One arc goes at most {LIMITS.distance_max} m." + PREPARES_MOVE,
+    direction=Param("string", "Which way the curve bends: left (counter-clockwise) or right (clockwise).", enum=["left", "right"]),
+    angle=Param("number", "How much of the circle to walk, in degrees: 90 is a quarter circle, 180 a half, 360 a full circle."),
+    radius=Param("number", "Radius of the circle in meters, default 0.5. 0 means a sharp corner (turn in place).", required=False),
+    speed=Param("number", "Forward speed along the curve in m/s; defaults to the walking speed.", required=False),
 )
 async def arc_tool(
     robot: Robot,
@@ -359,5 +366,4 @@ async def arc_tool(
     # walked a quarter when asked for a circle). The tool registry refuses a call without it.
     # Examples: arc("left", 90) -> vx 0.4, wz +45.8 for 1.96 s |
     #   arc("right", angle=180, radius=1.0, speed=0.6) -> vx 0.6, wz -34.4 for 5.24 s
-    return not_written("TODO 4", "arc in lab/part2_walk.py")
 # ====================================
