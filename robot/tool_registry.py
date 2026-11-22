@@ -151,7 +151,7 @@ _TYPES = {"string": (str,), "number": (int, float), "integer": (int,), "boolean"
 
 def on_board_refusal(robot: Robot, name: str) -> Result | None:
     """The refusal for tool ``name`` while Pupper is on the board (or about to be, or
-    fallen on it), or None if it may run. call() checks it, and so do the robot
+    fallen or e-stopped on it), or None if it may run. call() checks it, and so do the robot
     server's debug endpoints that run the same behaviors."""
     if (SKATING in (robot.state_now, robot.state_after_queue) or robot.fell_off_board) and name not in ON_BOARD_TOOLS:
         # Refuse now, with the reason, instead of queueing a job the robot would refuse

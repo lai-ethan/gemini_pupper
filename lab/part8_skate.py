@@ -122,7 +122,7 @@ async def ride(robot: Robot, seconds: float, direction: str = "straight", sharpn
 async def end_skating(robot: Robot, held: bool) -> Result:
     """Leave skate mode: stop pushing and relax the motors. A person must be holding Pupper."""
     # On the board now or once the queue has run (an end already queued still leaves Pupper on the
-    # board until it runs), or fallen on it: there is something to end.
+    # board until it runs), or fallen or e-stopped on it: there is something to end.
     if SKATING not in (robot.state_now, robot.state_after_queue) and not robot.fell_off_board:
         return Result(False, "Pupper is not in skate mode, so there is nothing to end")
     if not held:

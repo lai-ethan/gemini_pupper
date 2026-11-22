@@ -75,7 +75,7 @@ from std_srvs.srv import Trigger
 
 from spawn_controllers import LOADED, spawn
 from tricks import TRICK_FADE_S, TRICK_INIT_S, WALK_CONTROLLER, WALK_READY_S, Trick, load_tricks, reference_message_data
-from skateboard import FELL_ON_BOARD_MESSAGE, ON_BOARD_MESSAGE, SKATE_CONTROLLER, SKATING, load_skate
+from skateboard import FELL_ON_BOARD_MESSAGE, ON_BOARD_MESSAGE, SKATE_CONTROLLER, SKATING, STOPPED_ON_BOARD_MESSAGE, load_skate
 
 
 log = logging.getLogger("robot_api")
@@ -244,7 +244,7 @@ class Robot:
         self.gamepad_estop_at = 0.0  # monotonic time of the last gamepad e-stop
         # Tilt e-stops: the controller that latched one, until a safe stand-up clears it.
         self.fallen: str | None = None
-        self.fell_off_board = False  # fell while skating: on the board until the motors relax
+        self.fell_off_board = False  # fell or e-stopped while skating: on the board until end_skating
         self.imu: collections.deque = collections.deque()  # (monotonic t, tilt deg, gyro rad/s)
         self.node.create_subscription(Imu, "/imu_sensor_broadcaster/imu", self._on_imu, 10)
         self.node.create_subscription(Log, "/rosout", self._on_rosout, 100)
@@ -360,7 +360,8 @@ class Robot:
             # deck. The only way out is relaxing the motors, with a person holding Pupper.
             return Result(False, f"can't switch to {controller}: {ON_BOARD_MESSAGE}")
         # A fall from the board leaves Pupper on it, maybe upright on the deck, so the
-        # guard holds through the fall (fell_off_board) until the motors relax.
+        # guard holds through the fall, and through a gamepad e-stop on the board (fell_off_board),
+        # until the motors relax with a person holding Pupper (end_skating).
         activate = [controller] if controller else []
         deactivate = sorted(self.leg_controllers - set(activate))
         states = await self.controller_states()
@@ -668,11 +669,16 @@ class Robot:
         asyncio.run_coroutine_threadsafe(self.emergency_stop(), self.loop)
 
     async def emergency_stop(self) -> Result:
-        """Gamepad e-stop: cancel everything and relax every leg controller."""
+        """Gamepad e-stop: cancel everything and relax every leg controller.
+
+        Stopped on the board, Pupper is still on it: the board guard (fell_off_board)
+        stays on until a person holds it and end_skating relaxes the motors again."""
+        on_board = self.state_now == SKATING or self.fell_off_board
         await self.immediate_stop()
         self.state_now = self.state_after_queue = MOTORS_IDLE  # no exit clip: the motors just relax
-        self.fell_off_board = False
+        self.fell_off_board = on_board
         states = await self.controller_states()
+        self.fell_off_board = on_board or states.get(SKATE_CONTROLLER) == "active"
         active = [c for c in sorted(self.leg_controllers) if states.get(c) == "active"]
         if active:
             req = SwitchController.Request()
@@ -732,6 +738,8 @@ class Robot:
         if self.fallen:
             how = FELL_ON_BOARD_MESSAGE if self.fell_off_board else FELL_MESSAGE
             return Result(True, f"mode: fallen over (tilt e-stop in {self.fallen}). {how}")
+        if self.fell_off_board and states.get(SKATE_CONTROLLER) != "active":
+            return Result(True, f"mode: {STOPPED_ON_BOARD_MESSAGE}")
         mode = (
             "skating: on the skateboard in skate mode (skate_forward and skate_turn ride it; end_skating"
             " relaxes the motors to get off)" if states.get(SKATE_CONTROLLER) == "active"

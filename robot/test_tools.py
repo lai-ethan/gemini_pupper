@@ -1551,8 +1551,14 @@ async def skate_robot() -> None:
         await rig.settle()
         rig.imu(tilt_deg=3)
         res = await rig.ts.switch_to(LOCOMOTION_CONTROLLER)
-        check("the gamepad e-stop after a fall from the board also clears the guard",
-              res.ok and rig.ts.state_now == LOCOMOTION, f"got {res}")
+        check("the gamepad e-stop after a fall from the board keeps the guard: walking is refused",
+              not res.ok and "skateboard" in res.message and rig.ts.fell_off_board
+              and not rig.robot.active() & rig.ts.leg_controllers, f"got {res}")
+        res = await rig.ts.switch_to(None)
+        check("... relaxing the motors (end_skating, with Pupper held) releases it",
+              res.ok and not rig.ts.fell_off_board, f"got {res}")
+        res = await rig.ts.switch_to(LOCOMOTION_CONTROLLER)
+        check("... and then standing up to walk works", res.ok and rig.ts.state_now == LOCOMOTION, f"got {res}")
 
         await rig.ts.wait(3.0)  # past the e-stop's 2 s window, so a tilt e-stop counts again
         rig.robot.send("/rosout", _Msg(name=LOCOMOTION_CONTROLLER, msg=robot_api.ESTOP_LOG))
@@ -1863,7 +1869,7 @@ async def skate_guards() -> None:
               rig.ts.state_now == SKATING and rig.ts.state_after_queue == SKATING and len(rig.robot.switches) == switches,
               f"state {rig.ts.state_now}/{rig.ts.state_after_queue}")
 
-        # stop on the board: stays in skate mode, guard on. The gamepad e-stop: relaxes, guard off.
+        # stop on the board: stays in skate mode, guard on. The gamepad e-stop: relaxes, guard stays on.
         res = await rig.call("stop")
         res2 = await rig.call("stand_up")
         check("stop on the board keeps skate mode (balancing), and the board guard holds",
@@ -1876,12 +1882,44 @@ async def skate_guards() -> None:
         await rig.settle()
         check("the gamepad e-stop while riding relaxes the motors: the skate controller is off",
               rig.ts.state_now == robot_api.MOTORS_IDLE and rig.ts.state_after_queue == robot_api.MOTORS_IDLE
-              and not rig.robot.active() & rig.ts.leg_controllers and not rig.ts.fell_off_board,
+              and not rig.robot.active() & rig.ts.leg_controllers,
               f"state {rig.ts.state_now}; active {rig.robot.active()}")
         last = rig.robot.twists()[-1][1]
         check("... the last speed command is zero", last.linear.x == 0 and last.angular.z == 0)
+        check("... and Pupper is still known to be on the board", rig.ts.fell_off_board)
+        switches, mark = len(rig.robot.switches), len(rig.robot.twists())
+        for name, args in [("stand_up", {}), ("move", {"direction": "forward", "speed": 0.3, "duration": 2}),
+                           ("follow", {"enabled": True}), ("play_trick", {"name": "bow"})]:
+            res = await rig.call(name, **args)
+            check(f"... {name} is refused for the board, and says why", not res.ok and "skateboard" in res.message,
+                  f"got {res}")
+        out = await server.walking_activate()
+        await rig.settle()
+        check("... so is the debug endpoint /walking/activate", not out["success"] and "skateboard" in out["message"],
+              f"got {out}")
+        check("... none of them moved the legs or sent a speed", len(rig.robot.switches) == switches
+              and not walk_twists_since(rig, mark) and not rig.robot.active() & rig.ts.leg_controllers)
+        res = await rig.call("robot_status")
+        check("... robot_status says the motors are relaxed on the board: end_skating with held true, then stand_up",
+              "relaxed" in res.message and "board" in res.message and "end_skating" in res.message
+              and "held" in res.message and "stand_up" in res.message, res.message)
+        res = await rig.call("start_skating", placed=True)
+        check("... start_skating with placed=true takes the legs back", res.ok and rig.ts.state_now == SKATING
+              and SKATE_CONTROLLER in rig.robot.active(), f"got {res}; state {rig.ts.state_now}")
+        rig.robot.send("/emergency_stop", _DataMsg())
+        await rig.settle()
+        res = await rig.call("end_skating", held=True)
+        check("... after another e-stop, end_skating with held=true ends it and releases the guard",
+              res.ok and rig.ts.state_now == robot_api.MOTORS_IDLE and not rig.ts.fell_off_board
+              and not rig.robot.active() & rig.ts.leg_controllers, f"got {res}; state {rig.ts.state_now}")
         res = await rig.call("stand_up")
-        check("... and the board guard is released: stand_up works", res.ok and rig.ts.state_now == LOCOMOTION, f"got {res}")
+        check("... and then stand_up works", res.ok and rig.ts.state_now == LOCOMOTION, f"got {res}")
+        await rig.ts.wait(3.0)  # past the e-stop's 2 s window
+        rig.robot.send("/emergency_stop", _DataMsg())
+        await rig.settle()
+        res = await rig.call("stand_up")
+        check("the gamepad e-stop off the board leaves no board guard: stand_up works after it",
+              res.ok and rig.ts.state_now == LOCOMOTION and not rig.ts.fell_off_board, f"got {res}")
 
         # Two end_skating calls while a ride is still queued.
         await _on_board(rig)

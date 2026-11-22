@@ -64,6 +64,12 @@ FELL_ON_BOARD_MESSAGE = (
     " the board, so it can't stand up there. Ask a person to hold the harness, then call end_skating with"
     " held=true; once they have lifted Pupper off the board, stand_up gets it walking again"
 )
+# What robot_status says after the gamepad e-stop on the board: the motors are relaxed, Pupper is on it.
+STOPPED_ON_BOARD_MESSAGE = (
+    "motors relaxed on the skateboard (the e-stop stopped Pupper while it was on the board). It is still on"
+    " the board, so it can't stand up there. Ask a person to hold the harness, then call end_skating with"
+    " held=true; once they have lifted Pupper off the board, stand_up gets it walking again"
+)
 NOT_INSTALLED = "no skate policy is installed on this robot (skate/skate.yaml is missing), so Pupper can't skate"
 
 
