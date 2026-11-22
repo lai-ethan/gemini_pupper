@@ -10,6 +10,7 @@ e-stop) exactly as pupper_gait_deploy installs it, and adds:
     allowed, reference tricks such as the jump enabled), and one controller per
     policy trick in <repo>/tricks (see robot/tricks.py). Every motion Gemini asks
     for is one of these policies; there is no open-loop trick player.
+  - gemini_skate, the skateboard policy (skate/skate.yaml), when one is installed
 The joystick still drives the robot, now through the mux, where it outranks Gemini.
 
     ros2 launch robot/launch/gemini_pupper.launch.py
@@ -32,6 +33,7 @@ PARAMS = str(HERE / "gemini_pupper.yaml")
 sys.path.insert(0, str(HERE.parent))
 from spawn_controllers import PARAM_FILE as TRICK_PARAMS  # noqa: E402
 from tricks import WALK_CONTROLLER, controller_params, load_tricks, walk_controller_params, walk_policy_params  # noqa: E402
+from skateboard import SKATE_CONTROLLER, load_skate, skate_controller_params  # noqa: E402
 
 COURSE_CONFIG = PathJoinSubstitution([FindPackageShare("neural_controller"), "launch", "config.yaml"])
 
@@ -52,6 +54,9 @@ def gemini_controllers():
         params[t.controller] = {"ros__parameters": {**kind, **controller_params(t, base)}}
         if t.walks:  # a trick that walks in its own stance: its walking policy too
             params[t.walk_controller] = {"ros__parameters": {**kind, **walk_policy_params(t, base)}}
+    skate = load_skate()  # skate/skate.yaml: the skateboard policy, if installed
+    if skate is not None:
+        params[SKATE_CONTROLLER] = {"ros__parameters": {**kind, **skate_controller_params(skate, base)}}
     # The course config writes paths as $(find-pkg-share pkg)/...; the spawner's
     # parameter file isn't substituted, so expand them here.
     for entry in params.values():

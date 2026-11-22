@@ -301,7 +301,7 @@ def fixture_tricks() -> dict[str, Trick]:
 class Rig:
     """A fresh Robot wired to a fresh fake robot, standing in locomotion mode."""
 
-    def __init__(self, tricks=None):
+    def __init__(self, tricks=None, skate=None):
         global ROBOT
         self.clock = VirtualClock()
         ROBOT = self.robot = FakeRobot(self.clock)
@@ -309,8 +309,11 @@ class Rig:
         robot_api.time = types.SimpleNamespace(monotonic=self.clock.monotonic)
         robot_api.asyncio = _AsyncioShim(self.clock)
         robot_api.load_tricks = made
+        robot_api.load_skate = lambda: skate
         names = (set(robot_api.LEG_CONTROLLERS) | {t.controller for t in made().values()}
                  | {t.walk_controller for t in made().values() if t.walks})
+        if skate is not None:
+            names.add(SKATE_CONTROLLER)
         self.robot.controllers = {n: "inactive" for n in names}
         self.robot.controllers[LOCOMOTION_CONTROLLER] = "active"
         self.records: list[logging.LogRecord] = []
@@ -1425,11 +1428,58 @@ async def skate_config() -> None:
           skateboard.ON_BOARD_TOOLS == {"start_skating", "skate_forward", "skate_turn", "end_skating", "stop", "robot_status"})
 
 
+def fixture_skate() -> SkateConfig:
+    return SkateConfig(policy_path=Path("skate.json"), speed=0.3, carve={"gentle": 0.15, "medium": 0.3, "hard": 0.5},
+                       travel_m_per_s=0.3, turn_deg_per_s={"gentle": 0.7, "medium": 1.0, "hard": 1.9}, coast_m=0.3,
+                       default_seconds=3.0, max_seconds=5.0, queue_max_seconds=10.0)
+
+
+async def skate_robot() -> None:
+    print("Skate: the robot's skate mode")
+    rig = Rig()
+    try:
+        check("with no skate policy installed, the robot has no skate controller",
+              rig.ts.skate is None and SKATE_CONTROLLER not in rig.ts.leg_controllers)
+    finally:
+        rig.close()
+    rig = Rig(skate=fixture_skate())
+    try:
+        check("with one installed, the skate controller is a leg controller",
+              rig.ts.skate is not None and SKATE_CONTROLLER in rig.ts.leg_controllers)
+        await rig.call("lie_down")
+        res = await rig.ts.switch_to(SKATE_CONTROLLER)
+        check("switching to the skate controller works from motors idle", res.ok, f"got {res}")
+        check("... it alone holds the legs", rig.robot.active() & rig.ts.leg_controllers == {SKATE_CONTROLLER},
+              f"active: {rig.robot.active()}")
+        check("... and the state is skating", rig.ts.state_now == SKATING, f"state: {rig.ts.state_now}")
+        res = await rig.ts.mode()
+        check("robot_status says it is skating", "skating" in res.message, res.message)
+        res = await rig.ts.switch_to(LOCOMOTION_CONTROLLER)
+        check("on the board, the walking policy is refused", not res.ok and "skateboard" in res.message, f"got {res}")
+        check("... and nothing switched", rig.robot.active() & rig.ts.leg_controllers == {SKATE_CONTROLLER}
+              and rig.ts.state_now == SKATING, f"active: {rig.robot.active()}")
+        bow = rig.ts.tricks["bow"]
+        res = await rig.ts.switch_to(bow.controller)
+        check("... a trick is refused too", not res.ok and "skateboard" in res.message, f"got {res}")
+        before = rig.ts.state_after_queue
+        res = await rig.ts.set_following(True)
+        check("on the board, follow mode is refused", not res.ok and "skateboard" in res.message, f"got {res}")
+        check("... the follower stays off and the state is unchanged",
+              not rig.robot.follower_on and not rig.ts.following and rig.ts.state_after_queue == before)
+        res = await rig.ts.switch_to(None)
+        check("relaxing the motors leaves skate mode", res.ok and rig.ts.state_now == robot_api.MOTORS_IDLE
+              and not rig.robot.active() & rig.ts.leg_controllers, f"got {res}; state {rig.ts.state_now}")
+        res = await rig.ts.switch_to(LOCOMOTION_CONTROLLER)
+        check("after that, standing up to walk works again", res.ok and rig.ts.state_now == LOCOMOTION, f"got {res}")
+    finally:
+        rig.close()
+
+
 # ----------------------------------------------------------------------------- main
 GROUPS = {
     "todo1": todo1, "todo2": todo2, "todo3": todo3, "todo4": todo4, "todo5": todo5, "todo6": todo6,
     "todo7": todo7, "todo8": todo8, "todo9": todo9, "todo10": todo10, "todo11": todo11, "robot": provided,
-    "optional_jump": optional_jump, "skate_config": skate_config,
+    "optional_jump": optional_jump, "skate_config": skate_config, "skate_robot": skate_robot,
 }
 OPT_IN = {"optional_jump"}  # run only when asked for by name
 PARTS = {
@@ -1439,7 +1489,7 @@ PARTS = {
     "part4": ["todo7", "todo8"],
     "part5": ["todo9", "todo10"],
     "part7": ["todo11"],
-    "skate": ["skate_config"],
+    "skate": ["skate_config", "skate_robot"],
 }
 
 

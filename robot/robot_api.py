@@ -26,7 +26,8 @@ the table in the lab handout lists it too.
 The robot is always in exactly one state, and each state is whatever holds the
 legs: LOCOMOTION (the locomotion policy, the gemini_walk controller; follow mode
 is on or off inside it), one trick (its trick_<name> controller: trick mode),
-MOTORS_IDLE (nothing), or FALLEN. Changing state is one controller switch,
+MOTORS_IDLE (nothing), FALLEN, or SKATING (skateboard.py): the skate policy holds
+the legs, Pupper is on the board. Changing state is one controller switch,
 switch_to, and only switch_to (and a fall or the e-stop) changes robot.state_now.
 
 Adapted from the Pupper monorepo's ros_tool_server.py, without the LiveKit voice
@@ -74,6 +75,7 @@ from std_srvs.srv import Trigger
 
 from spawn_controllers import LOADED, spawn
 from tricks import TRICK_FADE_S, TRICK_INIT_S, WALK_CONTROLLER, WALK_READY_S, Trick, load_tricks, reference_message_data
+from skateboard import ON_BOARD_MESSAGE, SKATE_CONTROLLER, SKATING, load_skate
 
 
 log = logging.getLogger("robot_api")
@@ -87,6 +89,8 @@ LOCOMOTION_CONTROLLER = WALK_CONTROLLER
 LOCOMOTION = "locomotion"  # the locomotion policy holds the legs (following or not)
 MOTORS_IDLE = "motors idle"  # no controller holds the legs: Pupper lies down
 FALLEN = "fallen"  # a tilt e-stop latched: the motors only damp until a safe stand-up
+# SKATING (skateboard.py) is a state too: the skate policy holds the legs and Pupper
+# is on the skateboard. Only relaxing the motors leaves it (see switch_to).
 # gemini_walk holds the default pose for init_duration, then fades the policy in
 # over fade_in_duration (the course default controller's 2 s + 2 s); reference
 # tricks are refused until then. WALK_READY_S (tricks.py) is that wait.
@@ -221,8 +225,10 @@ class Robot:
         threading.Thread(target=self.executor.spin, daemon=True).start()
 
         self.tricks: dict[str, Trick] = load_tricks()
+        self.skate = load_skate()  # None: no skate policy installed
         self.leg_controllers = (LEG_CONTROLLERS | {t.controller for t in self.tricks.values() if t.kind == "policy"}
-                                | {t.walk_controller for t in self.tricks.values() if t.walks})
+                                | {t.walk_controller for t in self.tricks.values() if t.walks}
+                                | ({SKATE_CONTROLLER} if self.skate else set()))
         self.param_clients: dict[str, object] = {}  # controller -> its set_parameters client
         self.following = False
         self.commands: asyncio.Queue = asyncio.Queue()
@@ -344,8 +350,13 @@ class Robot:
         is upright and still), loading a controller the launch file missed,
         leaving an interactive trick through its exit clip before another motion
         takes the legs, waiting until the locomotion policy is ready to walk, and
-        keeping robot.state_now up to date.
+        keeping robot.state_now up to date. In skate mode it refuses every controller
+        but the skate one; relaxing the motors is allowed.
         """
+        if self.state_now == SKATING and controller not in (None, SKATE_CONTROLLER):
+            # Half on a board, any other policy would start with two feet on a rolling
+            # deck. The only way out is relaxing the motors, with a person holding Pupper.
+            return Result(False, f"can't switch to {controller}: {ON_BOARD_MESSAGE}")
         activate = [controller] if controller else []
         deactivate = sorted(self.leg_controllers - set(activate))
         states = await self.controller_states()
@@ -428,6 +439,8 @@ class Robot:
         trick's walking policy is that trick's state too."""
         if controller is None:
             return MOTORS_IDLE
+        if controller == SKATE_CONTROLLER:
+            return SKATING
         for t in self.tricks.values():
             if t.kind == "policy" and (t.controller == controller or (t.walks and t.walk_controller == controller)):
                 return t
@@ -611,6 +624,8 @@ class Robot:
             return Result(True, "stopped following")
         if self.following:
             return Result(True, "already following the nearest person")
+        if SKATING in (self.state_now, self.state_after_queue):
+            return Result(False, f"can't follow: {ON_BOARD_MESSAGE}")
         await self.clear_queue()
         if self.current and not self.current.done():
             self.current.cancel()
@@ -695,7 +710,9 @@ class Robot:
         if self.fallen:
             return Result(True, f"mode: fallen over (tilt e-stop in {self.fallen}). {FELL_MESSAGE}")
         mode = (
-            "locomotion, following a person" if self.following
+            "skating: on the skateboard in skate mode (skate_forward and skate_turn ride it; end_skating"
+            " relaxes the motors to get off)" if states.get(SKATE_CONTROLLER) == "active"
+            else "locomotion, following a person" if self.following
             else "locomotion" if states.get(LOCOMOTION_CONTROLLER) == "active"
             else (f"trick {walking.name}, walking in its {walking.end_pose} stance (move, turn and arc walk slowly in it; "
                   f"actions: {', '.join(walking.actions)})") if walking
