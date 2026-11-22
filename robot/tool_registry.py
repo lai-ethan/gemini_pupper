@@ -13,7 +13,8 @@ can be called anything (in lab/ it is the name plus _tool, so it doesn't clash
 with the behavior of the same name).
 
 A description may contain {tricks} or {actions}: the installed tricks, or the
-installed interactive actions, one per line. A parameter's enum (the values Gemini
+installed interactive actions, one per line. {skate} is replaced by what
+skate/skate.yaml says about skating. A parameter's enum (the values Gemini
 may pass) may be TRICK_NAMES or ACTION_IDS for the same lists.
 
 The web app asks the robot server for the declarations (GET /tools) when it
@@ -31,6 +32,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from robot_api import CALL_STOPS, Result, Robot
+from skateboard import ON_BOARD_MESSAGE, ON_BOARD_TOOLS, SKATING
 
 log = logging.getLogger("tools")
 
@@ -58,7 +60,7 @@ TOOLS: dict[str, Tool] = {}
 
 # The lab's files, in the order of the lab. Gemini gets the tools in this order.
 LAB_DIR = Path(__file__).resolve().parent.parent / "lab"
-LAB_MODULES = ["basics", "part2_walk", "part3_follow", "part4_tricks", "part5_interactive_action"]
+LAB_MODULES = ["basics", "part2_walk", "part3_follow", "part4_tricks", "part5_interactive_action", "part8_skate"]
 
 
 def tool(tool_name: str, description: str, /, **params: Param):
@@ -115,6 +117,8 @@ def _describe(text: str, robot: Robot) -> str:
         text = text.replace("{tricks}", _trick_list(robot))
     if "{actions}" in text:
         text = text.replace("{actions}", _action_list(robot))
+    if "{skate}" in text:
+        text = text.replace("{skate}", robot.skate.describe() if robot.skate else "(No skate policy is installed yet.)")
     return text
 
 
@@ -150,6 +154,10 @@ async def call(robot: Robot, name: str, args: dict) -> Result:
     t = TOOLS.get(name)
     if t is None:
         return Result(False, f"unknown tool {name}; the tools are {sorted(TOOLS)}")
+    if (SKATING in (robot.state_now, robot.state_after_queue) or robot.fell_off_board) and name not in ON_BOARD_TOOLS:
+        # On the board (or about to be, or fallen on it): refuse now, with the reason, instead of
+        # queueing a job the robot would refuse later (Robot.switch_to enforces the same rule).
+        return Result(False, f"{name} is not possible right now: {ON_BOARD_MESSAGE}")
     args = dict(args or {})
     extra = sorted(set(args) - set(t.params))
     if extra:

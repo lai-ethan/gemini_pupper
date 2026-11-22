@@ -336,7 +336,7 @@ class Rig:
                     return True
         return False
 
-    async def call(self, name: str, **args):
+    async def call(self, name: str, /, **args):
         """Call a tool the way Gemini does, and let the queue run it."""
         res = await tools.call(self.ts, name, args)
         await self.settle()
@@ -1527,11 +1527,164 @@ async def skate_robot() -> None:
         rig.close()
 
 
+async def _on_board(rig: Rig) -> None:
+    """Relax, then start skate mode the way a person and Gemini would."""
+    await rig.call("lie_down")
+    res = await rig.call("start_skating", placed=True)
+    assert res.ok and rig.ts.state_now == SKATING, f"could not start skating: {res}; state {rig.ts.state_now}"
+
+
+def _ride_twists(rig: Rig, start: int = 0):
+    return [(t, m) for t, m in rig.robot.twists()[start:] if abs(m.linear.x) + abs(m.angular.z) > 1e-9]
+
+
+async def skate_tools() -> None:
+    print("Skate: the tools Gemini calls")
+    names = ["start_skating", "skate_forward", "skate_turn", "end_skating"]
+    rig = Rig()
+    try:
+        described(rig, names, "skate")
+        res = await rig.call("start_skating", placed=True)
+        check("with no skate policy installed, start_skating says so", not res.ok and "installed" in res.message, f"got {res}")
+        res = await rig.call("skate_forward")
+        check("... and so does skate_forward", not res.ok and "installed" in res.message, f"got {res}")
+    finally:
+        rig.close()
+
+    rig = Rig(skate=fixture_skate())
+    try:
+        decls = {d["name"]: d for d in tools.declarations(rig.ts)}
+        check("skate_forward's description carries the numbers from skate.yaml",
+              "0.3 m/s" in decls["skate_forward"]["description"] and "{skate}" not in decls["skate_forward"]["description"],
+              decls["skate_forward"]["description"])
+        res = await rig.call("skate_forward")
+        check("riding before skate mode is refused, and says how to start",
+              not res.ok and "start_skating" in res.message and not _ride_twists(rig), f"got {res}")
+        res = await rig.call("start_skating", placed=True)
+        check("start_skating while standing is refused, and says to lie down first",
+              not res.ok and "lie_down" in res.message and not rig.robot.activations(SKATE_CONTROLLER), f"got {res}")
+        await rig.call("lie_down")
+        res = await rig.call("start_skating", placed=False)
+        check("start_skating without a person placing Pupper is refused",
+              not res.ok and "place" in res.message and not rig.robot.activations(SKATE_CONTROLLER), f"got {res}")
+        res = await rig.call("start_skating", placed=True)
+        check("start_skating after placing is accepted", res.ok, f"got {res}")
+        check("... the skate policy takes the legs", rig.robot.activations(SKATE_CONTROLLER) and rig.ts.state_now == SKATING,
+              f"state {rig.ts.state_now}")
+        check("... with no failure in the queue", not rig.failures(), f"{rig.failures()}")
+        started = rig.robot.activations(SKATE_CONTROLLER)[0]
+
+        mark = len(rig.robot.twists())
+        res = await rig.call("skate_forward", seconds=3)
+        ride = _ride_twists(rig, mark)
+        check("skate_forward is accepted", res.ok, f"got {res}")
+        check("... it waits until the policy has faded in", bool(ride) and ride[0][0] >= started + WALK_READY_S - 1e-6,
+              f"first command {ride[0][0] - started:.2f} s after the switch" if ride else "no commands")
+        check("... sends 0.3 m/s straight ahead, nothing sideways, no turn",
+              bool(ride) and all(abs(m.linear.x - 0.3) < 1e-9 and m.linear.y == 0 and m.angular.z == 0 for _, m in ride))
+        check("... for 3 s at 20 Hz", 58 <= len(ride) <= 62, f"{len(ride)} commands")
+        last = rig.robot.twists()[-1][1]
+        check("... and ends with a zero command", last.linear.x == 0 and last.angular.z == 0)
+        check("the reply gives the estimate (about 0.9 m) and says it is one",
+              "0.9 m" in res.message and "stimate" in res.message and "obstacle" in res.message, res.message)
+        check("... and Pupper is still in skate mode", rig.ts.state_now == SKATING and rig.ts.state_after_queue == SKATING)
+
+        for direction, sharpness, wz in [("left", "hard", 0.5), ("right", "hard", -0.5), ("left", "gentle", 0.15)]:
+            mark = len(rig.robot.twists())
+            res = await rig.call("skate_turn", direction=direction, sharpness=sharpness, seconds=2)
+            ride = _ride_twists(rig, mark)
+            check(f"skate_turn {direction} {sharpness} carves at {wz:+g} rad/s while riding at 0.3 m/s",
+                  res.ok and bool(ride) and all(abs(m.angular.z - wz) < 1e-3 and abs(m.linear.x - 0.3) < 1e-9 for _, m in ride),
+                  f"got {res}; z = {sorted({round(m.angular.z, 3) for _, m in ride})}")
+        mark = len(rig.robot.twists())
+        res = await rig.call("skate_turn", direction="left")
+        ride = _ride_twists(rig, mark)
+        check("skate_turn defaults to a medium carve for 3 s",
+              res.ok and 58 <= len(ride) <= 62 and all(abs(m.angular.z - 0.3) < 1e-3 for _, m in ride), f"got {res}")
+        check("... and its reply estimates the turn in degrees", "degrees" in res.message, res.message)
+
+        mark = len(rig.robot.twists())
+        res = await rig.call("skate_forward", seconds=6)
+        check("a command over 5 s is refused, with the limit", not res.ok and "5 s" in res.message and not _ride_twists(rig, mark),
+              f"got {res}")
+        res = await rig.call("skate_forward", seconds=0.5)
+        check("a command under 1 s is refused, with the limit", not res.ok and "1 s" in res.message, f"got {res}")
+
+        rig.clock.now = max(rig.clock.now, rig.ts.busy_until)  # a job that finishes faster than its estimate leaves a lead in busy_until
+        first = await tools.call(rig.ts, "skate_forward", {"seconds": 5})
+        second = await tools.call(rig.ts, "skate_forward", {"seconds": 5})
+        third = await tools.call(rig.ts, "skate_forward", {"seconds": 1})
+        check("10 s of riding can be queued", first.ok and second.ok, f"got {first}; {second}")
+        check("... and more than that is refused, with the limit", not third.ok and "10 s" in third.message, f"got {third}")
+        await rig.settle()
+
+        switches = len(rig.robot.switches)
+        for name, args in [("stand_up", {}), ("lie_down", {}), ("move", {}), ("turn", {}), ("arc", {}),
+                           ("follow", {"enabled": True}), ("play_trick", {"name": "bow"})]:
+            res = await rig.call(name, **args)
+            check(f"{name} is refused on the board, and says why", not res.ok and "skateboard" in res.message, f"got {res}")
+        check("... and none of them touched the controllers or the follower",
+              len(rig.robot.switches) == switches and not rig.robot.follower_on and rig.ts.state_now == SKATING)
+
+        mark = len(rig.robot.twists())
+        await tools.call(rig.ts, "skate_forward", {"seconds": 5})
+        for _ in range(40):
+            await _real_sleep(0)
+        res = await rig.call("stop")
+        ride = _ride_twists(rig, mark)
+        last = rig.robot.twists()[-1][1]
+        check("stop cuts a ride short", res.ok and 0 < len(ride) < 90, f"got {res}; {len(ride)} commands")
+        check("... the last command is zero", last.linear.x == 0 and last.angular.z == 0)
+        check("... and Pupper stays in skate mode, balancing", rig.ts.state_now == SKATING
+              and SKATE_CONTROLLER in rig.robot.active())
+
+        rig.ts.fallen = SKATE_CONTROLLER
+        res = await rig.call("skate_forward")
+        check("after a fall, riding is refused and says so", not res.ok and "fell" in res.message, f"got {res}")
+        rig.ts.fallen = None
+
+        res = await rig.call("end_skating", held=False)
+        check("end_skating without a person holding Pupper is refused",
+              not res.ok and "hold" in res.message and rig.ts.state_now == SKATING, f"got {res}")
+        res = await rig.call("end_skating", held=True)
+        check("end_skating with a person holding relaxes the motors",
+              res.ok and rig.ts.state_now == robot_api.MOTORS_IDLE and not rig.robot.active() & rig.ts.leg_controllers,
+              f"got {res}; state {rig.ts.state_now}")
+        res = await rig.call("stand_up")
+        check("after that, stand_up works again", res.ok and rig.ts.state_now == LOCOMOTION, f"got {res}")
+
+        # Falling off the board (the skate policy's tilt e-stop, as in skate_robot): the
+        # tools keep the on-board rules until end_skating relaxes the motors.
+        await _on_board(rig)
+        rig.robot.send("/rosout", _Msg(name=SKATE_CONTROLLER, msg=robot_api.ESTOP_LOG))
+        await rig.settle()
+        rig.imu(tilt_deg=3)  # upright and still, as if caught on the deck
+        switches = len(rig.robot.switches)
+        res = await rig.call("move")
+        check("after a fall from the board, move is refused up front, and says why",
+              rig.ts.fell_off_board and not res.ok and "skateboard" in res.message and len(rig.robot.switches) == switches,
+              f"got {res}; fell_off_board {rig.ts.fell_off_board}")
+        res = await rig.call("end_skating", held=False)
+        check("... end_skating without a person holding Pupper is still refused",
+              not res.ok and "hold" in res.message and rig.ts.fell_off_board and len(rig.robot.switches) == switches,
+              f"got {res}")
+        res = await rig.call("end_skating", held=True)
+        check("... end_skating with a person holding still relaxes the motors",
+              res.ok and rig.ts.state_now == robot_api.MOTORS_IDLE and not rig.ts.fell_off_board
+              and not rig.robot.active() & rig.ts.leg_controllers, f"got {res}; state {rig.ts.state_now}")
+        res = await rig.call("move")
+        check("... and afterwards walking tools are no longer refused for the board", "skateboard" not in res.message,
+              f"got {res}")
+    finally:
+        rig.close()
+
+
 # ----------------------------------------------------------------------------- main
 GROUPS = {
     "todo1": todo1, "todo2": todo2, "todo3": todo3, "todo4": todo4, "todo5": todo5, "todo6": todo6,
     "todo7": todo7, "todo8": todo8, "todo9": todo9, "todo10": todo10, "todo11": todo11, "robot": provided,
     "optional_jump": optional_jump, "skate_config": skate_config, "skate_robot": skate_robot,
+    "skate_tools": skate_tools,
 }
 OPT_IN = {"optional_jump"}  # run only when asked for by name
 PARTS = {
@@ -1541,7 +1694,7 @@ PARTS = {
     "part4": ["todo7", "todo8"],
     "part5": ["todo9", "todo10"],
     "part7": ["todo11"],
-    "skate": ["skate_config", "skate_robot"],
+    "skate": ["skate_config", "skate_robot", "skate_tools"],
 }
 
 
