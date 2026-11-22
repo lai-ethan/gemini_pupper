@@ -1,0 +1,18 @@
+# Skate mode for Gemini Pupper. Read by robot/skateboard.py; see its docstring.
+# The policy is pupper-mjlab's skateboard/policies/split_steer_v6_max0.3_policy.json.
+policy: policy.json
+speed: 0.3            # m/s: the only speed checked in sim; the policy clips here
+carve:                # yaw command, rad/s (0 rides straight)
+  gentle: 0.15
+  medium: 0.3
+  hard: 0.5           # not 0.6: one sim env lost the board there
+# Estimates from simulation (pupper-mjlab skateboard/tools/timed_ride.py).
+travel_m_per_s: 0.3
+turn_deg_per_s:
+  gentle: 0.7
+  medium: 1.0
+  hard: 1.9
+coast_m: 0.3
+default_seconds: 3
+max_seconds: 5
+queue_max_seconds: 10

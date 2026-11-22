@@ -30,6 +30,7 @@ import re
 import sys
 import tempfile
 import types
+import yaml
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -229,6 +230,8 @@ behaviors = tools.load_lab()  # noqa: E402  (everything in lab/: lab.walk, lab.c
 check_move = behaviors.check_move
 from robot_api import LIMITS, LLM_CMD_RATE, LOCOMOTION, LOCOMOTION_CONTROLLER, WALK_READY_S, Robot  # noqa: E402
 from tricks import Trick, WalkConfig  # noqa: E402
+import skateboard  # noqa: E402
+from skateboard import SKATE_CONTROLLER, SKATING, SkateConfig, load_skate, skate_controller_params  # noqa: E402
 
 _real_sleep = asyncio.sleep
 
@@ -1352,11 +1355,81 @@ async def provided() -> None:
         rig.close()
 
 
+# ----------------------------------------------------------------------------- the skateboard
+_POLICY_CLIP = {"command_clip": {"vx": [0.0, 0.3], "vy": [0.0, 0.0], "wz": [-0.6, 0.6]},
+                "heading_hold": {"kp": 1.0, "clip": 0.1, "yaw_threshold": 0.1, "walk_threshold": 0.05}}
+
+
+def _write_skate(**changes) -> Path:
+    """A skate folder in a fresh temp dir: skate.yaml (with changes) and a policy stub."""
+    spec = {"policy": "policy.json", "speed": 0.3, "carve": {"gentle": 0.15, "medium": 0.3, "hard": 0.5},
+            "travel_m_per_s": 0.3, "turn_deg_per_s": {"gentle": 0.7, "medium": 1.0, "hard": 1.9},
+            "coast_m": 0.3, "default_seconds": 3, "max_seconds": 5, "queue_max_seconds": 10}
+    spec.update(changes)
+    d = Path(tempfile.mkdtemp(prefix="gemini_pupper_skate_"))
+    (d / "skate.yaml").write_text(yaml.safe_dump(spec))
+    (d / "policy.json").write_text(json.dumps(_POLICY_CLIP))
+    return d
+
+
+def _skate_error(**changes) -> str:
+    try:
+        load_skate(_write_skate(**changes))
+    except ValueError as e:
+        return str(e)
+    return ""
+
+
+async def skate_config() -> None:
+    print("Skate: skate.yaml and the policy next to it")
+    check("a folder with no skate.yaml means no skate policy is installed",
+          load_skate(Path(tempfile.mkdtemp(prefix="gemini_pupper_noskate_"))) is None)
+    cfg = load_skate(_write_skate())
+    check("a good skate.yaml loads", cfg is not None and cfg.speed == 0.3 and cfg.carve["hard"] == 0.5
+          and cfg.max_seconds == 5.0 and cfg.policy_path.name == "policy.json", f"got {cfg}")
+    for what, changes, word in [
+        ("a speed above the policy's clip", {"speed": 0.4}, "0.3"),
+        ("a carve above the policy's clip", {"carve": {"gentle": 0.15, "medium": 0.3, "hard": 0.7}}, "0.6"),
+        ("a carve at the heading hold's threshold", {"carve": {"gentle": 0.1, "medium": 0.3, "hard": 0.5}}, "0.14"),
+        ("carves that do not get sharper", {"carve": {"gentle": 0.3, "medium": 0.2, "hard": 0.5}}, "sharper"),
+        ("a missing sharpness", {"carve": {"gentle": 0.15, "hard": 0.5}}, "medium"),
+        ("a command longer than the queue", {"max_seconds": 12}, "queue_max_seconds"),
+        ("a queue longer than 10 s", {"queue_max_seconds": 20}, "10"),
+        ("a default longer than the longest command", {"default_seconds": 6}, "max_seconds"),
+    ]:
+        err = _skate_error(**changes)
+        check(f"{what} is refused, with the number", bool(err) and word in err, f"error: {err!r}")
+    d = _write_skate()
+    (d / "policy.json").unlink()
+    try:
+        load_skate(d)
+        err = ""
+    except ValueError as e:
+        err = str(e)
+    check("a missing policy file is refused, and says where it goes", "policy.json" in err, f"error: {err!r}")
+    text = cfg.describe()
+    check("describe() gives Gemini the numbers", all(w in text for w in ("0.3 m/s", "5 s", "10 s", "1.9")), text)
+    check("... and says they are estimates and that Pupper cannot measure distance",
+          "estimate" in text and "cannot measure distance" in text, text)
+    base = {"model_path": "walk.json", "chord_partner": "x", "game_buttons": True, "max_body_angle": 1.0, "kp_scale": [1.0]}
+    params = skate_controller_params(cfg, base)
+    check("the skate controller runs the skate policy, with no joystick game features",
+          params["model_path"] == str(cfg.policy_path) and params["game_buttons"] is False
+          and params["reference_tricks"] is False and "chord_partner" not in params, f"got {params}")
+    check("... and keeps the course controller's tilt limit and trims",
+          params["max_body_angle"] == 1.0 and params["kp_scale"] == [1.0] and base["game_buttons"] is True)
+    real = load_skate()
+    check("the repo's own skate/skate.yaml loads", real is not None and real.speed <= 0.3
+          and real.carve["hard"] <= 0.5 and real.max_seconds <= 5 and real.queue_max_seconds <= 10, f"got {real}")
+    check("the on-board tools are the skate tools, stop and robot_status",
+          skateboard.ON_BOARD_TOOLS == {"start_skating", "skate_forward", "skate_turn", "end_skating", "stop", "robot_status"})
+
+
 # ----------------------------------------------------------------------------- main
 GROUPS = {
     "todo1": todo1, "todo2": todo2, "todo3": todo3, "todo4": todo4, "todo5": todo5, "todo6": todo6,
     "todo7": todo7, "todo8": todo8, "todo9": todo9, "todo10": todo10, "todo11": todo11, "robot": provided,
-    "optional_jump": optional_jump,
+    "optional_jump": optional_jump, "skate_config": skate_config,
 }
 OPT_IN = {"optional_jump"}  # run only when asked for by name
 PARTS = {
@@ -1366,6 +1439,7 @@ PARTS = {
     "part4": ["todo7", "todo8"],
     "part5": ["todo9", "todo10"],
     "part7": ["todo11"],
+    "skate": ["skate_config"],
 }
 
 
