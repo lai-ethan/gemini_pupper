@@ -1678,6 +1678,11 @@ async def skate_tools() -> None:
     finally:
         rig.close()
 
+    text = prompt_sections("Skateboard").lower()
+    check("prompt.md has a Skateboard section that says a person places Pupper", "place" in text, text[:200])
+    check("... that stop comes first", "stop" in text)
+    check("... and that distances are estimates and the path must be clear", "estimate" in text and "clear" in text)
+
 
 # ----------------------------------------------------------------------------- main
 GROUPS = {

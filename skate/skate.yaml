@@ -7,12 +7,12 @@ carve:                # yaw command, rad/s (0 rides straight)
   medium: 0.3
   hard: 0.5           # not 0.6: one sim env lost the board there
 # Estimates from simulation (pupper-mjlab skateboard/tools/timed_ride.py).
-travel_m_per_s: 0.3
+travel_m_per_s: 0.29
 turn_deg_per_s:
-  gentle: 0.7
-  medium: 1.0
-  hard: 1.9
-coast_m: 0.3
+  gentle: 1.1
+  medium: 1.4
+  hard: 2.2
+coast_m: 0.1
 default_seconds: 3
 max_seconds: 5
 queue_max_seconds: 10
