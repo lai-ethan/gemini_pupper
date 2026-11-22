@@ -6,7 +6,8 @@ the same speed commands the walking tools send (robot.send_speed), but the
 rules are different, because Pupper cannot measure distance or see obstacles:
 
   - A person places Pupper on the board. start_skating only runs after
-    Gemini passes placed=true, and only from motors idle.
+    Gemini passes placed=true, and only from motors idle or fallen (after a
+    fall on the board, the skate policy may take the legs back).
   - Every command is timed and short (skate.yaml: max_seconds), and only so
     much riding can be queued (queue_max_seconds). To keep going, a person
     has to ask again.
@@ -25,7 +26,7 @@ from __future__ import annotations
 
 from part3_follow import prepare_to_move
 from robot_api import FALLEN, FELL_MESSAGE, LLM_CMD_RATE, MOTORS_IDLE, WALK_READY_S, Result, Robot, state_name, with_note
-from skateboard import MIN_RIDE_S, NOT_INSTALLED, SHARPNESS, SKATE_CONTROLLER, SKATING, SkateConfig
+from skateboard import FELL_ON_BOARD_MESSAGE, MIN_RIDE_S, NOT_INSTALLED, SHARPNESS, SKATE_CONTROLLER, SKATING, SkateConfig
 from tool_registry import Param, tool
 
 PLACEMENT = "left feet on the deck, right feet on the floor, body parallel to the board, a hand on the harness"
@@ -34,6 +35,11 @@ NOT_SKATING = ("Pupper is not in skate mode. A person places it on the board fir
 
 
 # ============================================================ what the robot does
+def fell(robot: Robot) -> str:
+    """What Gemini hears after a fall: a fall on the board is ended with end_skating, not stand_up."""
+    return FELL_ON_BOARD_MESSAGE if robot.fell_off_board else FELL_MESSAGE
+
+
 def estimate(cfg: SkateConfig, seconds: float, direction: str, sharpness: str) -> str:
     """What a ride should do, in words, for the tool's reply. An estimate, and it says so."""
     text = f" Estimate from simulation, not measured: about {cfg.travel_m_per_s * seconds:.1f} m forward"
@@ -66,7 +72,7 @@ async def start_skating(robot: Robot, placed: bool) -> Result:
         robot.send_speed(0, 0, 0)
         await robot.sleep(WALK_READY_S)  # the controller eases into the stance, then fades the policy in
         if robot.fallen:
-            return Result(False, FELL_MESSAGE)
+            return Result(False, fell(robot))
         return Result(True, "in skate mode: balancing on the board, not rolling yet")
 
     res = await robot.queue("start skating", job, WALK_READY_S, then=SKATING)  # (3)
@@ -79,7 +85,7 @@ async def ride(robot: Robot, seconds: float, direction: str = "straight", sharpn
     if cfg is None:  # (1) now
         return Result(False, NOT_INSTALLED)
     if robot.fallen:
-        return Result(False, FELL_MESSAGE)
+        return Result(False, fell(robot))
     if robot.state_after_queue != SKATING:
         return Result(False, NOT_SKATING)
     if direction not in ("straight", "left", "right") or sharpness not in SHARPNESS:
@@ -96,14 +102,14 @@ async def ride(robot: Robot, seconds: float, direction: str = "straight", sharpn
 
     async def job() -> Result:  # (2) later
         if robot.fallen:
-            return Result(False, FELL_MESSAGE)
+            return Result(False, fell(robot))
         if robot.state_now != SKATING:
             return Result(False, f"did not ride: Pupper is in {state_name(robot.state_now)}, not in skate mode")
         end = robot.now() + seconds
         while robot.now() < end - 1e-6:
             if robot.fallen:
                 robot.send_speed(0, 0, 0)
-                return Result(False, FELL_MESSAGE)
+                return Result(False, fell(robot))
             robot.send_speed(cfg.speed, 0.0, wz * 57.2958)  # send_speed takes deg/s
             await robot.sleep(1.0 / LLM_CMD_RATE)
         robot.send_speed(0, 0, 0)
@@ -115,7 +121,9 @@ async def ride(robot: Robot, seconds: float, direction: str = "straight", sharpn
 
 async def end_skating(robot: Robot, held: bool) -> Result:
     """Leave skate mode: stop pushing and relax the motors. A person must be holding Pupper."""
-    if robot.state_after_queue != SKATING and not robot.fell_off_board:  # a fall from the board still needs ending
+    # On the board now or once the queue has run (an end already queued still leaves Pupper on the
+    # board until it runs), or fallen on it: there is something to end.
+    if SKATING not in (robot.state_now, robot.state_after_queue) and not robot.fell_off_board:
         return Result(False, "Pupper is not in skate mode, so there is nothing to end")
     if not held:
         return Result(False, "not ended: leaving skate mode relaxes the motors, and Pupper would drop onto the"

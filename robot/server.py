@@ -156,18 +156,25 @@ async def tool_call(name: str, args: dict = Body(default={})):
 
 
 # ------------------------------------------------------------------ commands
+# The debug panel's buttons run the same behaviors as Gemini's tools, so they get the
+# same board guard: on the skateboard each is refused like the tool it stands for.
 @app.post("/walking/activate")
 async def walking_activate():
-    return (await behaviors.stand_up(T())).as_dict()
+    refused = gemini_tools.on_board_refusal(T(), "stand_up")
+    return (refused or await behaviors.stand_up(T())).as_dict()
 
 
 @app.post("/walking/deactivate")
 async def walking_deactivate():
-    return (await behaviors.lie_down(T())).as_dict()
+    refused = gemini_tools.on_board_refusal(T(), "lie_down")  # on the board, end_skating (with held) relaxes
+    return (refused or await behaviors.lie_down(T())).as_dict()
 
 
 @app.post("/move/velocity")
 async def move_velocity(req: MoveVelocity):
+    refused = gemini_tools.on_board_refusal(T(), "move")
+    if refused:
+        return refused.as_dict()
     # The browser uses right/clockwise-positive; ROS uses left/counter-clockwise-positive.
     res = await behaviors.walk(T(), req.forward_backward_velocity, -req.right_left_velocity, -req.turning_velocity, req.duration)
     return res.as_dict()
@@ -175,6 +182,9 @@ async def move_velocity(req: MoveVelocity):
 
 @app.post("/move/direction")
 async def move_direction(req: MoveDirection):
+    refused = gemini_tools.on_board_refusal(T(), "move")
+    if refused:
+        return refused.as_dict()
     turn = await behaviors.walk(T(), 0.0, 0.0, -90.0 if req.heading > 0 else 90.0, abs(req.heading) / 90.0) if req.heading else None
     if turn and not turn.ok:
         return turn.as_dict()
@@ -183,12 +193,14 @@ async def move_direction(req: MoveDirection):
 
 @app.post("/animation")
 async def animation(req: Trick):
-    return (await behaviors.play_trick(T(), req.animation_name)).as_dict()
+    refused = gemini_tools.on_board_refusal(T(), "play_trick")
+    return (refused or await behaviors.play_trick(T(), req.animation_name)).as_dict()
 
 
 @app.post("/interactive_action")
 async def interactive_action(req: TrickAction):
-    return (await behaviors.interactive_action(T(), req.action)).as_dict()
+    refused = gemini_tools.on_board_refusal(T(), "interactive_action")
+    return (refused or await behaviors.interactive_action(T(), req.action)).as_dict()
 
 
 @app.get("/interactive_actions")

@@ -22,6 +22,9 @@ skate.yaml fields:
   max_seconds         the longest single command
   queue_max_seconds   the most riding that can be queued (at most MAX_RIDE_S)
 
+The ceilings below are hard: skate.yaml can only go lower. A value above one,
+a missing key or a missing policy clip is a ValueError naming the file and key.
+
 No skate.yaml means no skate mode: load_skate returns None and the skate
 tools say nothing is installed.
 
@@ -41,6 +44,9 @@ SKATE_CONTROLLER = "gemini_skate"  # the ros2_control controller that runs the s
 SKATING = "skating"  # the state: the skate policy holds the legs, Pupper is on the board
 MIN_RIDE_S = 1.0  # shorter than this barely gets a push in
 MAX_RIDE_S = 10.0  # hardware runs are kept to about 10 s; skate.yaml can only go lower
+MAX_SPEED = 0.3  # m/s: the only speed checked in sim
+MAX_CARVE = 0.5  # rad/s: one sim env lost the board at 0.6
+MAX_COMMAND_S = 5.0  # s: the longest single command
 CARVE_MARGIN = 0.04  # rad/s a carve must clear the heading hold's threshold by
 SHARPNESS = ("gentle", "medium", "hard")
 
@@ -50,6 +56,13 @@ ON_BOARD_MESSAGE = (
     "Pupper is on the skateboard. There it can only ride forward (skate_forward), carve left or right"
     " (skate_turn) and stop. It cannot walk, go backward, step sideways, turn on the spot, follow or do"
     " tricks. To get off: a person holds the harness, then call end_skating"
+)
+# What Gemini hears after a tilt e-stop on the board, instead of robot_api.FELL_MESSAGE:
+# Pupper is still on the board, where stand_up is refused, so the way out comes first.
+FELL_ON_BOARD_MESSAGE = (
+    "Pupper fell on the skateboard: its tilt e-stop tripped and the motors only damp now. It is still on"
+    " the board, so it can't stand up there. Ask a person to hold the harness, then call end_skating with"
+    " held=true; once they have lifted Pupper off the board, stand_up gets it walking again"
 )
 NOT_INSTALLED = "no skate policy is installed on this robot (skate/skate.yaml is missing), so Pupper can't skate"
 
@@ -81,46 +94,71 @@ class SkateConfig:
 
 def load_skate(skate_dir: Path = SKATE_DIR) -> SkateConfig | None:
     """The skate config, or None when skate.yaml is not there. Raises ValueError
-    for numbers the policy was not trained on or that are over the limits."""
+    for a missing key, numbers the policy was not trained on or that are over the limits."""
     spec_path = skate_dir / "skate.yaml"
     if not spec_path.exists():
         return None
     spec = yaml.safe_load(spec_path.read_text())
-    policy_path = skate_dir / spec["policy"]
+    if not isinstance(spec, dict):
+        raise ValueError(f"{spec_path}: empty, or not a mapping of the fields in robot/skateboard.py")
+
+    def num(table: dict, key: str, where: str = "") -> float:
+        if key not in table:
+            raise ValueError(f"{spec_path}: missing {where}{key}")
+        try:
+            return float(table[key])
+        except (TypeError, ValueError):
+            raise ValueError(f"{spec_path}: {where}{key} must be a number, not {table[key]!r}") from None
+
+    if "policy" not in spec:
+        raise ValueError(f"{spec_path}: missing policy")
+    policy_path = skate_dir / str(spec["policy"])
     if not policy_path.exists():
         raise ValueError(f"{spec_path}: the policy {policy_path.name} is not in {skate_dir}; copy it there"
                          " (see skate/README.md)")
     policy = json.loads(policy_path.read_text())
-    clip = policy["command_clip"]
+    clip = policy.get("command_clip")
+    if not isinstance(clip, dict) or not all(isinstance(clip.get(k), list) and len(clip[k]) == 2 for k in ("vx", "wz")):
+        raise ValueError(f"{spec_path}: the policy {policy_path.name} has no command_clip with vx and wz ranges")
     hold = policy.get("heading_hold") or {}
-    speed = float(spec["speed"])
+    speed = num(spec, "speed")
     top_speed = max(clip["vx"])
     if not 0.0 < speed <= top_speed + 1e-6:
         raise ValueError(f"{spec_path}: speed {speed:g} must be above 0 and at most {top_speed:g} m/s, the policy's clip")
-    missing = [s for s in SHARPNESS if s not in (spec.get("carve") or {})]
-    if missing:
-        raise ValueError(f"{spec_path}: carve needs {list(SHARPNESS)}; missing {missing}")
-    carve = {s: float(spec["carve"][s]) for s in SHARPNESS}
+    if speed > MAX_SPEED + 1e-6:
+        raise ValueError(f"{spec_path}: speed {speed:g} is over the {MAX_SPEED:g} m/s ceiling")
+    for table in ("carve", "turn_deg_per_s"):
+        missing = [s for s in SHARPNESS if s not in (spec.get(table) or {})]
+        if missing:
+            raise ValueError(f"{spec_path}: {table} needs {list(SHARPNESS)}; missing {missing}")
+    carve = {s: num(spec["carve"], s, "carve ") for s in SHARPNESS}
     lowest = float(hold.get("yaw_threshold", 0.0)) + CARVE_MARGIN
     top_carve = min(abs(clip["wz"][0]), abs(clip["wz"][1]))
     for s, wz in carve.items():
         if not lowest - 1e-6 <= wz <= top_carve + 1e-6:
             raise ValueError(f"{spec_path}: carve {s} {wz:g} must be from {lowest:g} (clear of the heading hold)"
                              f" to {top_carve:g} rad/s (the policy's clip)")
+        if wz > MAX_CARVE + 1e-6:
+            raise ValueError(f"{spec_path}: carve {s} {wz:g} is over the {MAX_CARVE:g} rad/s ceiling")
     if not carve["gentle"] < carve["medium"] < carve["hard"]:
         raise ValueError(f"{spec_path}: carve must get sharper from gentle to medium to hard, not {carve}")
-    turn = {s: float(spec["turn_deg_per_s"][s]) for s in SHARPNESS}
-    default_s, max_s, queue_s = (float(spec[k]) for k in ("default_seconds", "max_seconds", "queue_max_seconds"))
+    turn = {s: num(spec["turn_deg_per_s"], s, "turn_deg_per_s ") for s in SHARPNESS}
+    travel, coast = num(spec, "travel_m_per_s"), num(spec, "coast_m")
+    estimates = {"travel_m_per_s": travel, "coast_m": coast, **{f"turn_deg_per_s {s}": v for s, v in turn.items()}}
+    for key, v in estimates.items():
+        if not v > 0.0:
+            raise ValueError(f"{spec_path}: the estimate {key} {v:g} must be above 0 (measure it in sim)")
+    default_s, max_s, queue_s = (num(spec, k) for k in ("default_seconds", "max_seconds", "queue_max_seconds"))
     if queue_s > MAX_RIDE_S + 1e-6:
         raise ValueError(f"{spec_path}: queue_max_seconds {queue_s:g} is more than {MAX_RIDE_S:g} s")
     if not MIN_RIDE_S <= max_s <= queue_s:
         raise ValueError(f"{spec_path}: max_seconds {max_s:g} must be from {MIN_RIDE_S:g} s to queue_max_seconds {queue_s:g}")
+    if max_s > MAX_COMMAND_S + 1e-6:
+        raise ValueError(f"{spec_path}: max_seconds {max_s:g} is over the {MAX_COMMAND_S:g} s ceiling")
     if not MIN_RIDE_S <= default_s <= max_s:
         raise ValueError(f"{spec_path}: default_seconds {default_s:g} must be from {MIN_RIDE_S:g} s to max_seconds {max_s:g}")
-    return SkateConfig(policy_path=policy_path, speed=speed, carve=carve,
-                       travel_m_per_s=float(spec["travel_m_per_s"]), turn_deg_per_s=turn,
-                       coast_m=float(spec["coast_m"]), default_seconds=default_s, max_seconds=max_s,
-                       queue_max_seconds=queue_s)
+    return SkateConfig(policy_path=policy_path, speed=speed, carve=carve, travel_m_per_s=travel, turn_deg_per_s=turn,
+                       coast_m=coast, default_seconds=default_s, max_seconds=max_s, queue_max_seconds=queue_s)
 
 
 def skate_controller_params(cfg: SkateConfig, base: dict) -> dict:

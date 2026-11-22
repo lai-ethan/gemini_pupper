@@ -75,7 +75,7 @@ from std_srvs.srv import Trigger
 
 from spawn_controllers import LOADED, spawn
 from tricks import TRICK_FADE_S, TRICK_INIT_S, WALK_CONTROLLER, WALK_READY_S, Trick, load_tricks, reference_message_data
-from skateboard import ON_BOARD_MESSAGE, SKATE_CONTROLLER, SKATING, load_skate
+from skateboard import FELL_ON_BOARD_MESSAGE, ON_BOARD_MESSAGE, SKATE_CONTROLLER, SKATING, load_skate
 
 
 log = logging.getLogger("robot_api")
@@ -366,6 +366,11 @@ class Robot:
         states = await self.controller_states()
         if not states:
             return Result(False, "controller_manager is not running; is the robot stack launched?")
+        if states.get(SKATE_CONTROLLER) == "active" and controller not in (None, SKATE_CONTROLLER):
+            # The skate policy holds the legs although state_now missed it (a stop came in
+            # while the switch to it was being answered, and the switch went through).
+            self.state_now = SKATING
+            return Result(False, f"can't switch to {controller}: {ON_BOARD_MESSAGE}")
         recovered = ""
         if self.fallen and activate:
             ok, why = await self._wait_upright()
@@ -514,8 +519,10 @@ class Robot:
             name, job, then = await self.commands.get()
             self._running_job_then = then
             self.current = asyncio.create_task(job())
+            failed = True
             try:
                 res = await self.current
+                failed = not res.ok
                 (log.info if res.ok else log.warning)("%s: %s", name, res.message)
             except asyncio.CancelledError:
                 self.send_speed(0, 0, 0)
@@ -524,6 +531,10 @@ class Robot:
                 log.exception("%s failed", name)
             finally:
                 self.current = None
+            if failed and self.commands.empty():
+                # The job did not get Pupper where it promised (then=), and nothing else is
+                # coming: what is queued now starts from where Pupper really is.
+                self.state_after_queue = self.state_now
 
     async def queue(self, name: str, job: Job, seconds: float, *, then) -> Result:
         """Put ``job`` in line behind everything already queued, and return at once.
@@ -694,6 +705,10 @@ class Robot:
             return Result(True, f"stopped; {cleared.message}")
         await asyncio.sleep(0.1)  # a job cancelled while switching to a trick may still finish the switch
         states = await self.controller_states()
+        if states.get(SKATE_CONTROLLER) == "active":  # ... or to the skate policy: then Pupper is on the board
+            self.state_now = self.state_after_queue = SKATING
+            return Result(True, f"stopped; {cleared.message}. Pupper is in skate mode on the board, balancing;"
+                                " end_skating gets it off")
         playing = [t for t in self.tricks.values() if t.kind == "policy" and states.get(t.controller) == "active"]
         if not playing:
             return Result(True, f"stopped; {cleared.message}")
@@ -715,7 +730,8 @@ class Robot:
         trick = next((t for t in self.tricks.values() if t.kind == "policy" and states.get(t.controller) == "active"), None)
         walking = next((t for t in self.tricks.values() if t.walks and states.get(t.walk_controller) == "active"), None)
         if self.fallen:
-            return Result(True, f"mode: fallen over (tilt e-stop in {self.fallen}). {FELL_MESSAGE}")
+            how = FELL_ON_BOARD_MESSAGE if self.fell_off_board else FELL_MESSAGE
+            return Result(True, f"mode: fallen over (tilt e-stop in {self.fallen}). {how}")
         mode = (
             "skating: on the skateboard in skate mode (skate_forward and skate_turn ride it; end_skating"
             " relaxes the motors to get off)" if states.get(SKATE_CONTROLLER) == "active"

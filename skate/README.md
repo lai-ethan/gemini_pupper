@@ -20,7 +20,15 @@ Tools: `lab/part8_skate.py`. Numbers: `skate.yaml`. Config loader:
 - If the tilt e-stop fires while skating (Pupper tips on the board), Pupper is
   marked fallen. Every walking tool, trick and follow stays refused until a
   person holds Pupper and `end_skating(held=true)` is called, or the gamepad
-  e-stop is pressed. `start_skating` is still allowed then.
+  e-stop is pressed. `start_skating` is still allowed then. `robot_status` and
+  the skate tools tell Gemini to call `end_skating(held=true)` first.
+- The board guard covers the web app's debug panel too: its walk, trick,
+  stand and lie-down buttons are refused on the board, like the tools. Its
+  stop button works. The gamepad is outside every server guard: on the board,
+  use only its e-stop.
+- "stop" during `start_skating`'s controller switch can still leave the skate
+  policy holding the legs; Pupper then counts as on the board, in skate mode.
+  A `start_skating` whose switch fails leaves Pupper in motors idle.
 - Desk test: `python3 lab/test.py skate` (no robot needed).
 - A new policy needs a TA's OK before its first run on the robot. The
   hardware checklist is test 6 in pupper-mjlab's

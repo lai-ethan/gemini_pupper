@@ -149,15 +149,25 @@ def declarations(robot: Robot) -> list[dict]:
 _TYPES = {"string": (str,), "number": (int, float), "integer": (int,), "boolean": (bool,)}
 
 
+def on_board_refusal(robot: Robot, name: str) -> Result | None:
+    """The refusal for tool ``name`` while Pupper is on the board (or about to be, or
+    fallen on it), or None if it may run. call() checks it, and so do the robot
+    server's debug endpoints that run the same behaviors."""
+    if (SKATING in (robot.state_now, robot.state_after_queue) or robot.fell_off_board) and name not in ON_BOARD_TOOLS:
+        # Refuse now, with the reason, instead of queueing a job the robot would refuse
+        # later (Robot.switch_to enforces the same rule).
+        return Result(False, f"{name} is not possible right now: {ON_BOARD_MESSAGE}")
+    return None
+
+
 async def call(robot: Robot, name: str, args: dict) -> Result:
     """Check a tool call against its declaration, then run it."""
     t = TOOLS.get(name)
     if t is None:
         return Result(False, f"unknown tool {name}; the tools are {sorted(TOOLS)}")
-    if (SKATING in (robot.state_now, robot.state_after_queue) or robot.fell_off_board) and name not in ON_BOARD_TOOLS:
-        # On the board (or about to be, or fallen on it): refuse now, with the reason, instead of
-        # queueing a job the robot would refuse later (Robot.switch_to enforces the same rule).
-        return Result(False, f"{name} is not possible right now: {ON_BOARD_MESSAGE}")
+    refused = on_board_refusal(robot, name)
+    if refused:
+        return refused
     args = dict(args or {})
     extra = sorted(set(args) - set(t.params))
     if extra:

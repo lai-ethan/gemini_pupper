@@ -88,6 +88,8 @@ class FakeRobot:
         self.follower_on = False
         self.follow_calls: list[str] = []
         self.start_clips: dict[str, list[str]] = {}  # controller -> start_clip values set, in order
+        self.switch_delay = 0.0  # s a switch takes to answer (the switch itself happens at once)
+        self.refuse: set[str] = set()  # controllers the controller manager refuses to activate
 
     def active(self) -> set[str]:
         return {n for n, s in self.controllers.items() if s == "active"}
@@ -113,6 +115,8 @@ class FakeRobot:
         if service.endswith("list_controllers"):
             return _Msg(controller=[_Msg(name=n, state=s) for n, s in self.controllers.items()])
         if service.endswith("switch_controller"):
+            if self.refuse & set(req.activate_controllers):
+                return _Msg(ok=False)
             for c in req.deactivate_controllers:
                 self.controllers[c] = "inactive"
             for c in req.activate_controllers:
@@ -147,11 +151,12 @@ ROBOT: FakeRobot | None = None
 
 
 class _Future:
-    def __init__(self, result):
+    def __init__(self, result, done_at=0.0):
         self._result = result
+        self._done_at = done_at
 
     def done(self):
-        return True
+        return ROBOT.clock.now >= self._done_at
 
     def result(self):
         return self._result
@@ -165,7 +170,8 @@ class _Client:
         return True
 
     def call_async(self, req):
-        return _Future(ROBOT.handle(self.name, req))
+        delay = ROBOT.switch_delay if self.name.endswith("switch_controller") else 0.0
+        return _Future(ROBOT.handle(self.name, req), ROBOT.clock.now + delay)
 
 
 class _Pub:
@@ -1363,24 +1369,33 @@ _POLICY_CLIP = {"command_clip": {"vx": [0.0, 0.3], "vy": [0.0, 0.0], "wz": [-0.6
                 "heading_hold": {"kp": 1.0, "clip": 0.1, "yaw_threshold": 0.1, "walk_threshold": 0.05}}
 
 
-def _write_skate(**changes) -> Path:
-    """A skate folder in a fresh temp dir: skate.yaml (with changes) and a policy stub."""
+def _write_skate(policy: dict | None = None, **changes) -> Path:
+    """A skate folder in a fresh temp dir: skate.yaml (with changes; None leaves a key
+    out) and a policy stub (``policy`` instead of the default one)."""
     spec = {"policy": "policy.json", "speed": 0.3, "carve": {"gentle": 0.15, "medium": 0.3, "hard": 0.5},
             "travel_m_per_s": 0.3, "turn_deg_per_s": {"gentle": 0.7, "medium": 1.0, "hard": 1.9},
             "coast_m": 0.3, "default_seconds": 3, "max_seconds": 5, "queue_max_seconds": 10}
     spec.update(changes)
+    spec = {k: v for k, v in spec.items() if v is not None}
     d = Path(tempfile.mkdtemp(prefix="gemini_pupper_skate_"))
     (d / "skate.yaml").write_text(yaml.safe_dump(spec))
-    (d / "policy.json").write_text(json.dumps(_POLICY_CLIP))
+    (d / "policy.json").write_text(json.dumps(_POLICY_CLIP if policy is None else policy))
     return d
 
 
-def _skate_error(**changes) -> str:
+def _load_error(d: Path) -> str:
+    """load_skate's ValueError for a folder ("" if it loads; any other error, by name)."""
     try:
-        load_skate(_write_skate(**changes))
+        load_skate(d)
     except ValueError as e:
         return str(e)
+    except Exception as e:
+        return f"not a ValueError: {type(e).__name__}: {e}"
     return ""
+
+
+def _skate_error(policy: dict | None = None, **changes) -> str:
+    return _load_error(_write_skate(policy, **changes))
 
 
 async def skate_config() -> None:
@@ -1402,6 +1417,29 @@ async def skate_config() -> None:
     ]:
         err = _skate_error(**changes)
         check(f"{what} is refused, with the number", bool(err) and word in err, f"error: {err!r}")
+    wide = {"command_clip": {"vx": [0.0, 0.5], "vy": [0.0, 0.0], "wz": [-0.8, 0.8]}}
+    for what, policy, changes, word in [
+        ("a speed above the 0.3 m/s ceiling, even if the policy's clip allows it", wide, {"speed": 0.4}, "0.3"),
+        ("a carve above the 0.5 rad/s ceiling, even if the policy's clip allows it", wide,
+         {"carve": {"gentle": 0.15, "medium": 0.3, "hard": 0.6}}, "0.5"),
+        ("a command longer than the 5 s ceiling", None, {"max_seconds": 6}, "5"),
+        ("a missing key, named", None, {"coast_m": None}, "coast_m"),
+        ("a missing turn estimate, named", None, {"turn_deg_per_s": {"gentle": 1.0, "medium": 1.4}}, "hard"),
+        ("a speed that is not a number, named", None, {"speed": "fast"}, "speed"),
+        ("a travel estimate that is not positive", None, {"travel_m_per_s": 0}, "travel_m_per_s"),
+        ("a turn estimate that is not positive", None, {"turn_deg_per_s": {"gentle": -1, "medium": 1.4, "hard": 2.2}},
+         "turn_deg_per_s"),
+        ("a coast estimate that is not positive", None, {"coast_m": 0}, "coast_m"),
+        ("a policy without a command_clip, named", {"heading_hold": {}}, {}, "command_clip"),
+    ]:
+        err = _skate_error(policy, **changes)
+        check(f"{what} is refused as a ValueError, with the file", bool(err) and word in err and "skate.yaml" in err
+              and "not a ValueError" not in err, f"error: {err!r}")
+    d = _write_skate()
+    (d / "skate.yaml").write_text("")
+    err = _load_error(d)
+    check("an empty skate.yaml is refused as a ValueError, with the file", "skate.yaml" in err
+          and "not a ValueError" not in err, f"error: {err!r}")
     d = _write_skate()
     (d / "policy.json").unlink()
     try:
@@ -1684,12 +1722,203 @@ async def skate_tools() -> None:
     check("... and that distances are estimates and the path must be clear", "estimate" in text and "clear" in text)
 
 
+def _load_server():
+    """robot/server.py with stand-ins for its web and camera libraries (the desk tests
+    don't install them), so its debug endpoints can be called like the web app does."""
+    class _App:
+        def __init__(self, *a, **k):
+            pass
+
+        def _route(self, *a, **k):
+            return lambda fn: fn
+
+        get = post = websocket = _route
+
+        def add_middleware(self, *a, **k):
+            pass
+
+        def mount(self, *a, **k):
+            pass
+
+    class _BaseModel:
+        def __init__(self, **kw):
+            self.__dict__.update(kw)
+
+    stubs = {
+        "cv2": {}, "numpy": {}, "psutil": {}, "uvicorn": {},
+        "fastapi": {"Body": lambda default=None: default, "FastAPI": _App, "HTTPException": Exception,
+                    "Response": object, "WebSocket": object, "WebSocketDisconnect": Exception},
+        "fastapi.middleware": {}, "fastapi.middleware.cors": {"CORSMiddleware": object},
+        "fastapi.staticfiles": {"StaticFiles": _App},
+        "pydantic": {"BaseModel": _BaseModel, "Field": lambda *a, **k: None},
+        "fisheye_converter": {"equirect_height": None, "fisheye_to_equirectangular": None, "load_camera_model": None},
+    }
+    saved = {name: sys.modules.get(name) for name in [*stubs, "server"]}
+    try:
+        for name, attrs in stubs.items():
+            m = types.ModuleType(name)
+            m.__dict__.update(attrs)
+            sys.modules[name] = m
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("server", HERE / "server.py")
+        server = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(server)
+        return server
+    finally:
+        for name, m in saved.items():
+            if m is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = m
+
+
+async def skate_guards() -> None:
+    print("Skate: the board guard holds on every path")
+    rig = Rig(skate=fixture_skate())
+    try:
+        # A stop while start_skating's controller switch is still being answered: the
+        # switch goes through anyway, so Pupper is on the board in skate mode.
+        await rig.call("lie_down")
+        rig.robot.switch_delay = 0.5
+        await tools.call(rig.ts, "start_skating", {"placed": True})
+        for _ in range(10_000):
+            if SKATE_CONTROLLER in rig.robot.active():
+                break
+            await _real_sleep(0)
+        res = await rig.call("stop")
+        rig.robot.switch_delay = 0.0
+        check("a stop during start_skating's switch: the skate policy holds the legs, and Pupper knows it",
+              SKATE_CONTROLLER in rig.robot.active() and rig.ts.state_now == SKATING
+              and rig.ts.state_after_queue == SKATING, f"got {res}; state {rig.ts.state_now}/{rig.ts.state_after_queue}")
+        check("... and stop's reply says Pupper is on the board in skate mode", "skate mode" in res.message, res.message)
+        switches = len(rig.robot.switches)
+        res = await rig.call("stand_up")
+        check("... so stand_up is refused for the board, and nothing switched",
+              not res.ok and "skateboard" in res.message and len(rig.robot.switches) == switches, f"got {res}")
+        rig.ts.state_now = rig.ts.state_after_queue = robot_api.MOTORS_IDLE  # as if the switch landed after stop looked
+        res = await rig.ts.switch_to(LOCOMOTION_CONTROLLER)
+        check("switch_to refuses another policy while the skate controller is active, whatever the state says",
+              not res.ok and "skateboard" in res.message and len(rig.robot.switches) == switches
+              and rig.ts.state_now == SKATING, f"got {res}; state {rig.ts.state_now}")
+        rig.ts.state_after_queue = SKATING
+        res = await rig.call("end_skating", held=True)
+        check("... and end_skating still gets Pupper off", res.ok and rig.ts.state_now == robot_api.MOTORS_IDLE
+              and SKATE_CONTROLLER not in rig.robot.active(), f"got {res}")
+
+        # The controller manager refuses the skate switch: Pupper never got on.
+        rig.robot.refuse = {SKATE_CONTROLLER}
+        await rig.call("start_skating", placed=True)
+        check("a start_skating whose switch fails leaves Pupper in motors idle, not skating",
+              rig.ts.state_now == robot_api.MOTORS_IDLE and rig.ts.state_after_queue == robot_api.MOTORS_IDLE,
+              f"state {rig.ts.state_now}/{rig.ts.state_after_queue}")
+        res = await rig.call("skate_forward")
+        check("... skate_forward then says Pupper is not in skate mode", not res.ok and "not in skate mode" in res.message,
+              f"got {res}")
+        res = await tools.call(rig.ts, "start_skating", {"placed": True})
+        check("... start_skating does not claim it is already skating", "already" not in res.message, f"got {res}")
+        await rig.settle()
+        rig.robot.refuse = set()
+        res = await rig.call("stand_up")
+        check("... and stand_up is not refused for the board", res.ok and rig.ts.state_now == LOCOMOTION, f"got {res}")
+
+        # Start queued but not run yet: the registry already treats Pupper as on the board.
+        await rig.call("lie_down")
+        await tools.call(rig.ts, "start_skating", {"placed": True})
+        queued = rig.ts.state_now == robot_api.MOTORS_IDLE and rig.ts.state_after_queue == SKATING
+        res = await tools.call(rig.ts, "stand_up", {})
+        check("with start_skating queued but not run, stand_up is refused up front",
+              queued and not res.ok and "skateboard" in res.message, f"got {res}; queued {queued}")
+        await rig.settle()
+        check("... and start_skating then runs", rig.ts.state_now == SKATING)
+
+        # The web app's debug endpoints go through the same board guard.
+        server = _load_server()
+        server.tools = rig.ts
+        switches, mark = len(rig.robot.switches), len(rig.robot.twists())
+        for what, endpoint, args in [
+            ("/move/velocity", server.move_velocity, [server.MoveVelocity(forward_backward_velocity=0.3,
+                                                                          right_left_velocity=0.0, turning_velocity=0.0,
+                                                                          duration=2.0)]),
+            ("/move/direction", server.move_direction, [server.MoveDirection(heading=90.0, speed=0.3, duration=2.0)]),
+            ("/animation", server.animation, [server.Trick(animation_name="bow")]),
+            ("/interactive_action", server.interactive_action, [server.TrickAction(action="wave_left")]),
+            ("/walking/activate", server.walking_activate, []),
+            ("/walking/deactivate", server.walking_deactivate, []),
+        ]:
+            out = await endpoint(*args)
+            await rig.settle()
+            check(f"on the board, the debug endpoint {what} is refused, and says why",
+                  not out["success"] and "skateboard" in out["message"] and rig.ts.state_after_queue == SKATING,
+                  f"got {out}; state after queue {rig.ts.state_after_queue}")
+        check("... none of them moved the legs or sent a speed", len(rig.robot.switches) == switches
+              and not walk_twists_since(rig, mark) and SKATE_CONTROLLER in rig.robot.active())
+        out = await server.stop_immediate()
+        check("... the stop endpoint still works on the board", out["success"] and rig.ts.state_now == SKATING, f"got {out}")
+
+        # A walk queued past the guards (as the debug endpoints could before): its job is
+        # refused, and the state Pupper will be in goes back to skating.
+        await behaviors.walk(rig.ts, 0.3, 0.0, 0.0, 2.0)
+        await rig.settle()
+        check("a walk that got queued on the board fails, and Pupper is still known to be skating",
+              rig.ts.state_now == SKATING and rig.ts.state_after_queue == SKATING and len(rig.robot.switches) == switches,
+              f"state {rig.ts.state_now}/{rig.ts.state_after_queue}")
+
+        # stop on the board: stays in skate mode, guard on. The gamepad e-stop: relaxes, guard off.
+        res = await rig.call("stop")
+        res2 = await rig.call("stand_up")
+        check("stop on the board keeps skate mode (balancing), and the board guard holds",
+              res.ok and rig.ts.state_now == SKATING and SKATE_CONTROLLER in rig.robot.active()
+              and not res2.ok and "skateboard" in res2.message, f"got {res}; {res2}")
+        await tools.call(rig.ts, "skate_forward", {"seconds": 5})
+        for _ in range(40):
+            await _real_sleep(0)
+        rig.robot.send("/emergency_stop", _DataMsg())
+        await rig.settle()
+        check("the gamepad e-stop while riding relaxes the motors: the skate controller is off",
+              rig.ts.state_now == robot_api.MOTORS_IDLE and rig.ts.state_after_queue == robot_api.MOTORS_IDLE
+              and not rig.robot.active() & rig.ts.leg_controllers and not rig.ts.fell_off_board,
+              f"state {rig.ts.state_now}; active {rig.robot.active()}")
+        last = rig.robot.twists()[-1][1]
+        check("... the last speed command is zero", last.linear.x == 0 and last.angular.z == 0)
+        res = await rig.call("stand_up")
+        check("... and the board guard is released: stand_up works", res.ok and rig.ts.state_now == LOCOMOTION, f"got {res}")
+
+        # Two end_skating calls while a ride is still queued.
+        await _on_board(rig)
+        await tools.call(rig.ts, "skate_forward", {"seconds": 3})
+        first = await tools.call(rig.ts, "end_skating", {"held": True})
+        second = await tools.call(rig.ts, "end_skating", {"held": True})
+        await rig.settle()
+        check("a second end_skating while one is queued is not 'nothing to end'",
+              first.ok and second.ok and "nothing" not in second.message, f"got {first}; {second}")
+        check("... and Pupper ends in motors idle", rig.ts.state_now == robot_api.MOTORS_IDLE
+              and not rig.robot.active() & rig.ts.leg_controllers)
+
+        # After a fall on the board, what Gemini hears names end_skating, not stand_up first.
+        await _on_board(rig)
+        rig.robot.send("/rosout", _Msg(name=SKATE_CONTROLLER, msg=robot_api.ESTOP_LOG))
+        await rig.settle()
+        res = await rig.call("robot_status")
+        check("after a fall on the board, robot_status says to end_skating with held true",
+              "end_skating" in res.message and "held" in res.message and "fell" in res.message, res.message)
+        res = await rig.call("skate_forward")
+        check("... and so does skate_forward's refusal", not res.ok and "end_skating" in res.message
+              and "held" in res.message, f"got {res}")
+        await rig.call("end_skating", held=True)
+    finally:
+        rig.close()
+
+
+def walk_twists_since(rig: Rig, start: int):
+    return [m for _, m in rig.robot.twists()[start:] if abs(m.linear.x) + abs(m.linear.y) + abs(m.angular.z) > 1e-9]
+
+
 # ----------------------------------------------------------------------------- main
 GROUPS = {
     "todo1": todo1, "todo2": todo2, "todo3": todo3, "todo4": todo4, "todo5": todo5, "todo6": todo6,
     "todo7": todo7, "todo8": todo8, "todo9": todo9, "todo10": todo10, "todo11": todo11, "robot": provided,
     "optional_jump": optional_jump, "skate_config": skate_config, "skate_robot": skate_robot,
-    "skate_tools": skate_tools,
+    "skate_tools": skate_tools, "skate_guards": skate_guards,
 }
 OPT_IN = {"optional_jump"}  # run only when asked for by name
 PARTS = {
@@ -1699,7 +1928,7 @@ PARTS = {
     "part4": ["todo7", "todo8"],
     "part5": ["todo9", "todo10"],
     "part7": ["todo11"],
-    "skate": ["skate_config", "skate_robot", "skate_tools"],
+    "skate": ["skate_config", "skate_robot", "skate_tools", "skate_guards"],
 }
 
 
