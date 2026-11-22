@@ -1471,6 +1471,58 @@ async def skate_robot() -> None:
               and not rig.robot.active() & rig.ts.leg_controllers, f"got {res}; state {rig.ts.state_now}")
         res = await rig.ts.switch_to(LOCOMOTION_CONTROLLER)
         check("after that, standing up to walk works again", res.ok and rig.ts.state_now == LOCOMOTION, f"got {res}")
+
+        # Falling off the board: the skate policy's tilt e-stop. Pupper may be resting
+        # upright on the deck, so the board guard must hold until a person relaxes it.
+        async def board_fall() -> None:
+            await rig.ts.switch_to(None)
+            rig.imu(tilt_deg=3)
+            await rig.ts.switch_to(SKATE_CONTROLLER)
+            rig.robot.send("/rosout", _Msg(name=SKATE_CONTROLLER, msg=robot_api.ESTOP_LOG))
+            await rig.settle()
+            rig.imu(tilt_deg=3)  # upright and still, as if caught on the deck
+
+        await board_fall()
+        check("a tilt e-stop in the skate policy is a fall", rig.ts.fallen == SKATE_CONTROLLER
+              and rig.ts.state_now == robot_api.FALLEN, f"fallen {rig.ts.fallen}; state {rig.ts.state_now}")
+        legs = rig.robot.active() & rig.ts.leg_controllers
+        res = await rig.ts.switch_to(LOCOMOTION_CONTROLLER)
+        check("after a fall from the board, the walking policy is still refused",
+              not res.ok and "skateboard" in res.message, f"got {res}")
+        check("... and the legs are untouched", rig.robot.active() & rig.ts.leg_controllers == legs
+              and rig.ts.fallen == SKATE_CONTROLLER, f"active: {rig.robot.active()}; fallen {rig.ts.fallen}")
+        res = await rig.ts.switch_to(bow.controller)
+        check("... a trick too", not res.ok and "skateboard" in res.message, f"got {res}")
+        res = await rig.ts.set_following(True)
+        check("... and follow mode", not res.ok and "skateboard" in res.message and not rig.robot.follower_on,
+              f"got {res}")
+        res = await rig.ts.switch_to(SKATE_CONTROLLER)
+        check("the skate policy can take the legs back after the fall", res.ok and rig.ts.state_now == SKATING
+              and rig.ts.fallen is None, f"got {res}; state {rig.ts.state_now}")
+        rig.robot.send("/rosout", _Msg(name=SKATE_CONTROLLER, msg=robot_api.ESTOP_LOG))
+        await rig.settle()
+        res = await rig.ts.switch_to(None)
+        check("relaxing the motors after a fall from the board works", res.ok and rig.ts.state_now == robot_api.MOTORS_IDLE
+              and not rig.robot.active() & rig.ts.leg_controllers, f"got {res}; state {rig.ts.state_now}")
+        rig.imu(tilt_deg=3)
+        res = await rig.ts.switch_to(LOCOMOTION_CONTROLLER)
+        check("... and after it, standing up to walk works again", res.ok and rig.ts.state_now == LOCOMOTION, f"got {res}")
+
+        await board_fall()
+        rig.robot.send("/emergency_stop", _Msg())
+        await rig.settle()
+        rig.imu(tilt_deg=3)
+        res = await rig.ts.switch_to(LOCOMOTION_CONTROLLER)
+        check("the gamepad e-stop after a fall from the board also clears the guard",
+              res.ok and rig.ts.state_now == LOCOMOTION, f"got {res}")
+
+        await rig.ts.wait(3.0)  # past the e-stop's 2 s window, so a tilt e-stop counts again
+        rig.robot.send("/rosout", _Msg(name=LOCOMOTION_CONTROLLER, msg=robot_api.ESTOP_LOG))
+        await rig.settle()
+        rig.imu(tilt_deg=3)
+        res = await rig.ts.switch_to(bow.controller)
+        check("a fall while walking is not a board fall: a trick may take the legs", res.ok
+              and rig.ts.fallen is None, f"got {res}")
     finally:
         rig.close()
 

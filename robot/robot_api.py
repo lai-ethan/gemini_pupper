@@ -244,6 +244,7 @@ class Robot:
         self.gamepad_estop_at = 0.0  # monotonic time of the last gamepad e-stop
         # Tilt e-stops: the controller that latched one, until a safe stand-up clears it.
         self.fallen: str | None = None
+        self.fell_off_board = False  # fell while skating: on the board until the motors relax
         self.imu: collections.deque = collections.deque()  # (monotonic t, tilt deg, gyro rad/s)
         self.node.create_subscription(Imu, "/imu_sensor_broadcaster/imu", self._on_imu, 10)
         self.node.create_subscription(Log, "/rosout", self._on_rosout, 100)
@@ -294,6 +295,7 @@ class Robot:
         if self.fallen:
             return
         self.fallen = controller
+        self.fell_off_board = controller == SKATE_CONTROLLER
         await self.immediate_stop()
         self.state_now = self.state_after_queue = FALLEN
         log.warning("tilt e-stop in %s: the robot fell over; waiting for a safe stand-up", controller)
@@ -353,10 +355,12 @@ class Robot:
         keeping robot.state_now up to date. In skate mode it refuses every controller
         but the skate one; relaxing the motors is allowed.
         """
-        if self.state_now == SKATING and controller not in (None, SKATE_CONTROLLER):
+        if (self.state_now == SKATING or self.fell_off_board) and controller not in (None, SKATE_CONTROLLER):
             # Half on a board, any other policy would start with two feet on a rolling
             # deck. The only way out is relaxing the motors, with a person holding Pupper.
             return Result(False, f"can't switch to {controller}: {ON_BOARD_MESSAGE}")
+        # A fall from the board leaves Pupper on it, maybe upright on the deck, so the
+        # guard holds through the fall (fell_off_board) until the motors relax.
         activate = [controller] if controller else []
         deactivate = sorted(self.leg_controllers - set(activate))
         states = await self.controller_states()
@@ -416,6 +420,7 @@ class Robot:
             self.walk_since = time.monotonic() - WALK_READY_S  # active before we started
         if not req.activate_controllers and not req.deactivate_controllers:
             self.state_now = self.state_of(controller)
+            self.fell_off_board = False
             if controller == LOCOMOTION_CONTROLLER:
                 await self._wait_walk_ready()
             return Result(True, recovered + "already in that state")
@@ -426,6 +431,7 @@ class Robot:
             log.warning("switch %s -> %s: %s", req.deactivate_controllers, req.activate_controllers, why)
             return Result(False, f"controller switch failed (activate {activate}): {why}")
         self.state_now = self.state_of(controller)
+        self.fell_off_board = False
         if LOCOMOTION_CONTROLLER in req.activate_controllers:
             self.walk_since = time.monotonic()
         if LOCOMOTION_CONTROLLER in req.deactivate_controllers:
@@ -624,7 +630,7 @@ class Robot:
             return Result(True, "stopped following")
         if self.following:
             return Result(True, "already following the nearest person")
-        if SKATING in (self.state_now, self.state_after_queue):
+        if SKATING in (self.state_now, self.state_after_queue) or self.fell_off_board:
             return Result(False, f"can't follow: {ON_BOARD_MESSAGE}")
         await self.clear_queue()
         if self.current and not self.current.done():
@@ -654,6 +660,7 @@ class Robot:
         """Gamepad e-stop: cancel everything and relax every leg controller."""
         await self.immediate_stop()
         self.state_now = self.state_after_queue = MOTORS_IDLE  # no exit clip: the motors just relax
+        self.fell_off_board = False
         states = await self.controller_states()
         active = [c for c in sorted(self.leg_controllers) if states.get(c) == "active"]
         if active:
