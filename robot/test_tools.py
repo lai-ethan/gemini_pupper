@@ -1713,6 +1713,9 @@ async def skate_robot() -> None:
         check("... and the state is skating", rig.ts.state_now == SKATING, f"state: {rig.ts.state_now}")
         res = await rig.ts.mode()
         check("robot_status says it is skating", "skating" in res.message, res.message)
+        want = ("mode: skating (policy steer_v6): on the skateboard in skate mode (skate_forward and skate_turn ride it;"
+                " end_skating relaxes the motors to get off)")
+        check("... and names the loaded policy", res.message == want, res.message, passes=want)
         res = await rig.ts.switch_to(LOCOMOTION_CONTROLLER)
         check("on the board, the walking policy is refused", not res.ok and "skateboard" in res.message, f"got {res}")
         check("... and nothing switched", rig.robot.active() & rig.ts.leg_controllers == {SKATE_CONTROLLER}
@@ -1816,9 +1819,22 @@ async def skate_tools() -> None:
     finally:
         rig.close()
 
+    placement = ("Pupper beside the board on the board's right, body parallel to it and facing the end with the castle"
+                 " picture, left feet on the middle of the deck, right feet on the floor, a hand on the harness")
+    got = behaviors.PLACEMENT
+    check("PLACEMENT says where Pupper stands on the board", got == placement, got, passes=placement)
+
     rig = Rig(skate=fixture_skate())
     try:
         decls = {d["name"]: d for d in tools.declarations(rig.ts)}
+        start_text = decls["start_skating"]["description"]
+        check("start_skating's description gives the wait from WALK_READY_S",
+              f"about {WALK_READY_S:.0f} s" in start_text, start_text)
+        stop_text = decls["stop"]["description"]
+        check("stop's description says that on the skateboard it stops the pushing and the board rolls on",
+              "skateboard" in stop_text and "pushing" in stop_text and "rolls on" in stop_text, stop_text)
+        check("robot_status's description lists skating among the states",
+              "skating" in decls["robot_status"]["description"], decls["robot_status"]["description"])
         check("skate_forward's description carries the numbers from skate.yaml",
               "0.3 m/s" in decls["skate_forward"]["description"] and "{skate}" not in decls["skate_forward"]["description"],
               decls["skate_forward"]["description"])
@@ -1832,6 +1848,7 @@ async def skate_tools() -> None:
         res = await rig.call("start_skating", placed=False)
         check("start_skating without a person placing Pupper is refused",
               not res.ok and "place" in res.message and not rig.robot.activations(SKATE_CONTROLLER), f"got {res}")
+        check("... and says where to place it", placement in res.message, res.message)
         res = await rig.call("start_skating", placed=True)
         check("start_skating after placing is accepted", res.ok, f"got {res}")
         check("... the skate policy takes the legs", rig.robot.activations(SKATE_CONTROLLER) and rig.ts.state_now == SKATING,
@@ -1947,6 +1964,12 @@ async def skate_tools() -> None:
     check("prompt.md has a Skateboard section that says a person places Pupper", "place" in text, text[:200])
     check("... that stop comes first", "stop" in text)
     check("... and that distances are estimates and the path must be clear", "estimate" in text and "clear" in text)
+    check('... where Pupper stands ("beside the board", "castle")', "beside the board" in text and "castle" in text, text)
+    check('... and that long rides drift ("drift")', "drift" in text, text)
+    queued = re.search(r"at most (\d+(?:\.\d+)?) s of riding", text)
+    limit = yaml.safe_load((skateboard.SKATE_DIR / "skate.yaml").read_text())["queue_max_seconds"]
+    check("... and its queue limit is skate.yaml's queue_max_seconds", bool(queued) and float(queued[1]) == float(limit),
+          f"prompt: {queued[0] if queued else 'no at most ... s of riding'}; skate.yaml: {limit}")
 
 
 def _load_server():

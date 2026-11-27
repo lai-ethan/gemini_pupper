@@ -29,7 +29,8 @@ from robot_api import FALLEN, FELL_MESSAGE, LLM_CMD_RATE, MOTORS_IDLE, WALK_READ
 from skateboard import FELL_ON_BOARD_MESSAGE, MIN_RIDE_S, SHARPNESS, SKATE_CONTROLLER, SKATING, SkateConfig, not_installed_message
 from tool_registry import Param, tool
 
-PLACEMENT = "left feet on the deck, right feet on the floor, body parallel to the board, a hand on the harness"
+PLACEMENT = ("Pupper beside the board on the board's right, body parallel to it and facing the end with the castle"
+             " picture, left feet on the middle of the deck, right feet on the floor, a hand on the harness")
 NOT_SKATING = ("Pupper is not in skate mode. A person places it on the board first (" + PLACEMENT
                + "); then call start_skating with placed=true")
 
@@ -143,8 +144,8 @@ async def end_skating(robot: Robot, held: bool) -> Result:
     "start_skating",
     "Start skate mode. Pupper cannot climb onto the skateboard: a person places it first (" + PLACEMENT + ")."
     " Pupper must be relaxed (call lie_down first if it is standing). Ask the person to place it, wait until they"
-    " say it is done, and only then call this with placed=true. It takes about 4 s; then Pupper balances on the"
-    " board without rolling. {skate}",
+    f" say it is done, and only then call this with placed=true. It takes about {WALK_READY_S:.0f} s; then Pupper"
+    " balances on the board without rolling. {skate}",
     placed=Param("boolean", "true only if a person has just said Pupper is placed on the board. Never guess."),
 )
 async def start_skating_tool(robot: Robot, placed: bool) -> Result:

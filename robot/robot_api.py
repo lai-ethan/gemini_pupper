@@ -744,8 +744,9 @@ class Robot:
             return Result(True, f"mode: fallen over (tilt e-stop in {self.fallen}). {how}")
         if self.fell_off_board and states.get(SKATE_CONTROLLER) != "active":
             return Result(True, f"mode: {STOPPED_ON_BOARD_MESSAGE}")
+        policy = f" (policy {self.skate.name})" if self.skate else ""
         mode = (
-            "skating: on the skateboard in skate mode (skate_forward and skate_turn ride it; end_skating"
+            f"skating{policy}: on the skateboard in skate mode (skate_forward and skate_turn ride it; end_skating"
             " relaxes the motors to get off)" if states.get(SKATE_CONTROLLER) == "active"
             else "locomotion, following a person" if self.following
             else "locomotion" if states.get(LOCOMOTION_CONTROLLER) == "active"
