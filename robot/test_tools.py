@@ -7,6 +7,7 @@ Run them after every change to a file in lab/ (lab/test.py runs this file):
     python3 lab/test.py todo3      # one TODO (todo1 ... todo11)
     python3 lab/test.py part2      # one part of the lab (part1 ... part7; part6, the spider, is the notebook)
     python3 lab/test.py robot      # the provided robot (should always pass)
+    python3 lab/test.py skate      # the skateboard (skate_demo: the demo in skate/DEMO.md, every policy)
     python3 lab/test.py optional_jump   # the optional jump
 
 A fake robot stands in for ROS. It keeps track of which controllers are on,

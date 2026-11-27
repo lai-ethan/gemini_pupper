@@ -27,9 +27,11 @@ gemini_pupper/
 │   ├── part3_follow.py          the follow rule, then the follow tool     TODO 5, 6
 │   ├── part4_tricks.py          play_trick, then its words                TODO 7, 8
 │   ├── part5_interactive_action.py  interactive_action, then its words              TODO 9, 10
+│   ├── part8_skate.py           final project: the skateboard tools (finished; read it)
 │   ├── test.py                  python3 lab/test.py todo3   (tests with a fake robot)
 │   └── chat.py                  python3 lab/chat.py         (talk to Gemini in text)
 ├── tricks/                      one folder per trick; sit_stay_shake lands here in Part 5
+├── skate/                       skate mode: skate.yaml (the policy catalogue), policies/, DEMO.md
 ├── robot/                       provided: the Robot API, the robot server, launch files, scripts
 ├── web/                         provided: the web app (TypeScript); you never need it
 └── docs/
@@ -105,7 +107,7 @@ python3 lab/chat.py --robot    # your tools on the real Pupper (through the robo
 ## Tricks
 
 Every trick is played by policies, so the robot is always in one simple state: locomotion,
-one trick (trick mode), motors idle, or fallen. Each folder under `tricks/` with a `trick.yaml` is a
+one trick (trick mode), motors idle, fallen, or skating (on the skateboard; see `skate/`). Each folder under `tricks/` with a `trick.yaml` is a
 trick Gemini can play (`robot/tricks.py` lists the fields). Tricks are trained
 in [pupper-mjlab](https://github.com/cs123-stanford/pupper-mjlab); training
 puts the policy on W&B, and one command fetches it:

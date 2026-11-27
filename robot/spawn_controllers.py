@@ -1,4 +1,5 @@
-"""Load Gemini's controllers (gemini_walk and one per policy trick) inactive.
+"""Load Gemini's controllers (gemini_walk, one per policy trick, and gemini_skate
+when a skate policy is installed: skate/skate.yaml) inactive.
 
 Run by launch/gemini_pupper.launch.py once the course's own controllers are up:
 

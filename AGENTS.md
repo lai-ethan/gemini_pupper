@@ -69,8 +69,10 @@ patch infrastructure to make a symptom go away.
 ## How to check work without the robot
 
 - `python3 lab/test.py` (or `todo1` ... `todo11`, `part1` ... `part7`,
-  `robot`): tests with a fake robot. Run them after every change in `lab/`.
-  They check what the tools do, not how they are written.
+  `robot`, `skate`): tests with a fake robot. Run them after every change in
+  `lab/`. They check what the tools do, not how they are written. `skate` is
+  the skateboard (`lab/part8_skate.py`, `skate/`); its `skate_demo` group
+  scripts the demo in `skate/DEMO.md` for every policy in `skate/skate.yaml`.
 - `python3 lab/chat.py`: talk to Gemini in text with the student's own prompt
   and tools, on the fake robot (nothing moves). It shows each tool call, the
   reply Gemini hears, and what the fake robot did. Never `--robot` without

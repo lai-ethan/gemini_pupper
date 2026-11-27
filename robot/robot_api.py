@@ -17,6 +17,10 @@ the table in the lab handout lists it too.
   await robot.sleep(seconds), robot.now()
                                   wait without freezing the server; the time now
   robot.fallen                    which controller fell over (None if upright)
+  robot.skate, robot.skate_error  the loaded skate config (skateboard.SkateConfig; None if
+                                  skate mode is off), and why it is off if skate.yaml is wrong
+  robot.fell_off_board            fell or e-stopped while skating: still on the board until
+                                  end_skating relaxes the motors
   robot.following, await robot.stop_following()
   await robot.is_active(controller)
   await robot.play_clip(trick, clip)
