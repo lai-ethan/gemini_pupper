@@ -33,7 +33,7 @@ from pydantic import BaseModel, Field
 import tool_registry as gemini_tools
 from fisheye_converter import equirect_height, fisheye_to_equirectangular, load_camera_model
 from robot_api import LIMITS, Robot
-from skateboard import SKATE_CONTROLLER, SKATING
+from skateboard import FELL_ON_BOARD_MESSAGE, SKATE_CONTROLLER, SKATING, STOPPED_ON_BOARD_MESSAGE
 
 behaviors = gemini_tools.load_lab()  # lab/: every tool, and the behaviors they call
 
@@ -173,9 +173,15 @@ async def walking_deactivate():
     refused = gemini_tools.on_board_refusal(T(), "lie_down")  # on the board, end_skating (with held) relaxes
     if not refused:
         return (await behaviors.lie_down(T())).as_dict()
-    stopped = await T().immediate_stop(relax_playing_trick=True)
-    if T().state_now != SKATING:  # e.g. relaxed by the e-stop on the board: the refusal says what to do
-        return {"success": False, "message": f"{stopped.message}. {refused.message}"}
+    robot = T()
+    await robot.immediate_stop(relax_playing_trick=True)
+    if not gemini_tools.on_board_refusal(robot, "lie_down"):  # start_skating was only queued: the stop cancelled it
+        res = await behaviors.lie_down(robot)
+        return {"success": res.ok, "message": f"stopped; start_skating was cancelled before it began. {res.message}"}
+    if robot.fallen:
+        return {"success": False, "message": f"stopped, but Pupper did not lie down. {FELL_ON_BOARD_MESSAGE}"}
+    if robot.state_now != SKATING:  # the e-stop relaxed the motors on the board
+        return {"success": False, "message": f"stopped, but Pupper did not lie down. Its {STOPPED_ON_BOARD_MESSAGE}"}
     return {"success": False, "message": "stopped the ride, but Pupper did not lie down: it is still balancing on"
                                          " the skateboard. To get off, a person holds the harness, then call"
                                          " end_skating with held=true"}
@@ -335,12 +341,24 @@ async def system_status():
 
 
 async def skate_status(robot: Robot | None) -> dict:
-    """Skate mode for the status bar: the loaded policy, a config error, the controller's state."""
+    """Skate mode for the status bar: the loaded policy, a config error, the controller's state.
+
+    controller: "active" the skate policy holds the legs; "inactive" it is loaded but not
+    running (a loaded but unconfigured or finalized controller reads as inactive too);
+    "missing" no skate config, or the controller manager doesn't list it; "unknown" the
+    server or the controller manager isn't ready, or asking it failed. The status bar polls
+    this, so it never waits for the controller manager to come up.
+    """
     cfg = robot.skate if robot else None
-    controller = "missing"
+    controller = "missing" if robot else "unknown"
     if cfg is not None:
-        state = (await robot.controller_states()).get(SKATE_CONTROLLER)
-        controller = "active" if state == "active" else "inactive" if state else "missing"
+        controller = "unknown"
+        try:
+            if robot.list_client.service_is_ready():
+                state = (await robot.controller_states()).get(SKATE_CONTROLLER)
+                controller = "active" if state == "active" else "inactive" if state else "missing"
+        except Exception as e:
+            log.warning("status: could not read the skate controller's state: %s", e)
     return {"installed": cfg is not None, "policy": cfg.name if cfg else None, "tested": cfg.tested if cfg else None,
             "error": robot.skate_error if robot else None, "controller": controller}
 

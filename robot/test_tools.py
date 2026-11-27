@@ -91,6 +91,7 @@ class FakeRobot:
         self.start_clips: dict[str, list[str]] = {}  # controller -> start_clip values set, in order
         self.switch_delay = 0.0  # s a switch takes to answer (the switch itself happens at once)
         self.refuse: set[str] = set()  # controllers the controller manager refuses to activate
+        self.unready: set[str] = set()  # services not advertised yet (service_is_ready is False)
 
     def active(self) -> set[str]:
         return {n for n, s in self.controllers.items() if s == "active"}
@@ -169,6 +170,9 @@ class _Client:
 
     def wait_for_service(self, timeout_sec=None):
         return True
+
+    def service_is_ready(self):
+        return self.name not in ROBOT.unready
 
     def call_async(self, req):
         delay = ROBOT.switch_delay if self.name.endswith("switch_controller") else 0.0
@@ -2242,10 +2246,10 @@ async def skate_guards() -> None:
     host = {"battery": {"percentage": 80.0, "is_charging": False, "voltage": 8.1},
             "cpu": {"usage": 5.0, "temperature": 50.0}, "services": {"robot": "active", "internet": "offline"}}
 
-    async def status(rig: Rig) -> dict | None:
+    async def status(rig: Rig | None) -> dict | None:
         if not hasattr(server, "host_status"):
             return None
-        server.tools = rig.ts
+        server.tools = rig.ts if rig else None
         server.host_status = lambda: dict(host)
         out = server.system_status()
         return await out if inspect.isawaitable(out) else out
@@ -2280,6 +2284,75 @@ async def skate_guards() -> None:
         sk = out and out.get("skate")
         check("... with no skate config: not installed, no error, controller missing",
               sk == {"installed": False, "policy": None, "tested": None, "error": None, "controller": "missing"}, f"got {sk}")
+    finally:
+        rig.close()
+
+    # The status bar polls /system/status: it must never wait on the controller manager.
+    rig = Rig(skate=fixture_skate())
+    try:
+        calls = []
+        real_states = rig.ts.controller_states
+
+        async def counted():
+            calls.append(1)
+            return await real_states()
+
+        rig.ts.controller_states = counted
+        rig.robot.unready = {"/controller_manager/list_controllers"}
+        await rig.settle()
+        calls.clear()
+        out = await status(rig)
+        check("with the controller manager not ready, /system/status answers at once: controller unknown,"
+              " battery and cpu still there, and controller_states was not called",
+              out is not None and out.get("skate", {}).get("controller") == "unknown" and out.get("battery") == host["battery"]
+              and out.get("cpu") == host["cpu"] and not calls, f"got {out}; {len(calls)} calls")
+        rig.robot.unready = set()
+
+        async def broken():
+            raise RuntimeError("controller_manager went away")
+
+        rig.ts.controller_states = broken
+        out = await status(rig)
+        check("if asking the controller manager fails, controller is unknown and battery and cpu still come back",
+              out is not None and out.get("skate", {}).get("controller") == "unknown"
+              and out.get("battery") == host["battery"] and out.get("cpu") == host["cpu"], f"got {out}")
+    finally:
+        rig.close()
+    out = await status(None)
+    check("before the robot is ready (tools None), the skate block says not installed, controller unknown",
+          out is not None and out.get("skate") == {"installed": False, "policy": None, "tested": None, "error": None,
+                                                    "controller": "unknown"}, f"got {out and out.get('skate')}")
+
+    # Disconnect when Pupper is on the board but cannot ride, and while start_skating is only queued.
+    rig = Rig(skate=fixture_skate())
+    try:
+        server.tools = rig.ts
+        await _on_board(rig)
+        rig.robot.send("/emergency_stop", _DataMsg())
+        await rig.settle()
+        out = await server.walking_deactivate()
+        await rig.settle()
+        want = "stopped, but Pupper did not lie down. Its " + skateboard.STOPPED_ON_BOARD_MESSAGE
+        check("disconnect after the e-stop on the board says the motors relaxed there and names end_skating with held",
+              out == {"success": False, "message": want}, f"got {out}")
+        res = await rig.call("start_skating", placed=True)
+        rig.robot.send("/rosout", _Msg(name=SKATE_CONTROLLER, msg=robot_api.ESTOP_LOG))
+        await rig.settle()
+        rig.imu(tilt_deg=3)
+        out = await server.walking_deactivate()
+        await rig.settle()
+        want = "stopped, but Pupper did not lie down. " + skateboard.FELL_ON_BOARD_MESSAGE
+        check("disconnect after a fall on the board says it fell and names end_skating with held",
+              res.ok and out == {"success": False, "message": want}, f"got {out}")
+        await rig.call("end_skating", held=True)
+        await tools.call(rig.ts, "start_skating", {"placed": True})  # queued, not run yet
+        queued = rig.ts.state_now == robot_api.MOTORS_IDLE and rig.ts.state_after_queue == SKATING
+        out = await server.walking_deactivate()
+        await rig.settle()
+        want = "stopped; start_skating was cancelled before it began. lie down queued; the queue should finish in 1.0 s"
+        check("disconnect while start_skating is only queued cancels it and says so, then lies down as usual",
+              queued and out == {"success": True, "message": want}
+              and rig.ts.state_now == robot_api.MOTORS_IDLE and SKATE_CONTROLLER not in rig.robot.active(), f"got {out}")
     finally:
         rig.close()
 
