@@ -54,9 +54,9 @@ def gemini_controllers():
         params[t.controller] = {"ros__parameters": {**kind, **controller_params(t, base)}}
         if t.walks:  # a trick that walks in its own stance: its walking policy too
             params[t.walk_controller] = {"ros__parameters": {**kind, **walk_policy_params(t, base)}}
-    skate, skate_error = load_skate_safe()  # skate/skate.yaml: the skateboard policy, if installed
+    skate, skate_error, skate_detail = load_skate_safe()  # skate/skate.yaml: the skateboard policy, if installed
     if skate_error:  # a bad skate.yaml turns skate mode off; the rest of the robot still starts
-        print(f"gemini_pupper: skate mode is off: {skate_error}", file=sys.stderr)
+        print(f"gemini_pupper: skate mode is off: {skate_detail or skate_error}", file=sys.stderr)
     if skate is not None:
         params[SKATE_CONTROLLER] = {"ros__parameters": {**kind, **skate_controller_params(skate, base)}}
     # The course config writes paths as $(find-pkg-share pkg)/...; the spawner's

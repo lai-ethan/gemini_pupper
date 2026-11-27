@@ -226,9 +226,10 @@ class Robot:
 
         self.tricks: dict[str, Trick] = load_tricks()
         # None: no skate policy installed, or (skate_error) skate.yaml is wrong: skate mode is off, the rest runs
-        self.skate, self.skate_error = load_skate_safe()
+        # skate_error is what Gemini hears; skate_detail (the full path and exception) only goes to the log
+        self.skate, self.skate_error, skate_detail = load_skate_safe()
         if self.skate_error:
-            log.error("skate mode is off: %s", self.skate_error)
+            log.error("skate mode is off: %s", skate_detail or self.skate_error)
         self.leg_controllers = (LEG_CONTROLLERS | {t.controller for t in self.tricks.values() if t.kind == "policy"}
                                 | {t.walk_controller for t in self.tricks.values() if t.walks}
                                 | ({SKATE_CONTROLLER} if self.skate else set()))

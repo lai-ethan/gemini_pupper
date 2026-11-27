@@ -307,9 +307,10 @@ def fixture_tricks() -> dict[str, Trick]:
 class Rig:
     """A fresh Robot wired to a fresh fake robot, standing in locomotion mode."""
 
-    def __init__(self, tricks=None, skate=None, skate_error=None):
+    def __init__(self, tricks=None, skate=None, skate_error=None, skate_detail=None):
         """skate: the SkateConfig the robot loads (None: not installed); skate_error:
-        instead, the message of a skate.yaml that failed to load (skate mode off)."""
+        instead, the message of a skate.yaml that failed to load (skate mode off), and
+        skate_detail the full detail load_skate_safe gives for the log."""
         global ROBOT
         self.clock = VirtualClock()
         ROBOT = self.robot = FakeRobot(self.clock)
@@ -317,7 +318,7 @@ class Rig:
         robot_api.time = types.SimpleNamespace(monotonic=self.clock.monotonic)
         robot_api.asyncio = _AsyncioShim(self.clock)
         robot_api.load_tricks = made
-        robot_api.load_skate_safe = lambda: (skate, skate_error)
+        robot_api.load_skate_safe = lambda: (skate, skate_error, skate_detail)
         names = (set(robot_api.LEG_CONTROLLERS) | {t.controller for t in made().values()}
                  | {t.walk_controller for t in made().values() if t.walks})
         if skate is not None:
@@ -1487,7 +1488,7 @@ def _safe(d: Path):
     try:
         return skateboard.load_skate_safe(d)
     except Exception as e:
-        return "raised", f"{type(e).__name__}: {e}"
+        return "raised", f"{type(e).__name__}: {e}", None
 
 
 async def skate_catalogue() -> None:
@@ -1549,15 +1550,16 @@ async def skate_catalogue() -> None:
               and word in err and "not a SkateConfigError" not in err, f"error: {err!r}")
 
     empty = Path(tempfile.mkdtemp(prefix="gemini_pupper_noskate_"))
-    check("load_skate_safe: no skate.yaml is (None, None), skate mode not installed", _safe(empty) == (None, None),
-          f"got {_safe(empty)}")
+    check("load_skate_safe: no skate.yaml is (None, None, None), skate mode not installed",
+          _safe(empty) == (None, None, None), f"got {_safe(empty)}")
     got = _safe(_write_skate())
-    check("load_skate_safe: a good skate.yaml is (config, None)", isinstance(got[0], SkateConfig) and got[1] is None,
-          f"got {got}")
+    check("load_skate_safe: a good skate.yaml is (config, None, None)", isinstance(got[0], SkateConfig)
+          and got[1:] == (None, None), f"got {got}")
     for what, d, _ in bad_cases + [("a policy name not in the catalogue", _write_spec({**good, "policy": "steer_v99"}), "")]:
         got = _safe(d)
-        check(f"load_skate_safe: {what} is (None, the message), and nothing raised", got[0] is None
-              and isinstance(got[1], str) and "skate.yaml" in got[1], f"got {got}")
+        check(f"load_skate_safe: {what} is (None, the message, the detail for the log), and nothing raised",
+              got[0] is None and isinstance(got[1], str) and got[1].startswith("skate.yaml: ")
+              and isinstance(got[2], str) and str(d) in got[2], f"got {got}")
 
     check("not_installed_message(None) is the not-installed text",
           skateboard.not_installed_message(None) == skateboard.NOT_INSTALLED, skateboard.not_installed_message(None))
@@ -1565,6 +1567,89 @@ async def skate_catalogue() -> None:
     check("not_installed_message(error) says skate mode is off because of the config, and quotes the error",
           msg == "skate mode is off on this robot because its config has an error (skate.yaml: policy 'x' is not one"
                  " of steer_v6), so Pupper can't skate", msg)
+
+    # Fix round 1: what a bad config looks like, and the cases the first loader let through.
+    for what, d, _ in bad_cases:
+        err = _load_error(d)
+        check(f"{what}: the error starts with the bare file name and has no directory or exception text",
+              err.startswith("skate.yaml: ") and str(d) not in err and "Error" not in err and "line " not in err,
+              f"error: {err!r}")
+
+    def raw(text: str) -> Path:
+        d = _write_skate()
+        (d / "skate.yaml").write_text(text)
+        return d
+
+    text = (_write_skate() / "skate.yaml").read_text()
+    dup_entry = text.replace("policies:\n", "policies:\n  steer_v6:\n    file: other.json\n", 1)
+    for what, d, word in [
+        ("a catalogue entry written twice", raw(dup_entry), "steer_v6"),
+        ("a top-level policy: line written twice", raw("policy: steer_v99\n" + text), "policy"),
+        ("a nested key written twice", raw(text.replace("  gentle: 0.15\n", "  gentle: 0.15\n  gentle: 0.2\n", 1)),
+         "gentle"),
+    ]:
+        err = _load_error(d)
+        check(f"{what} is a SkateConfigError naming the key", err.startswith("skate.yaml: ") and word in err
+              and "twice" in err and "not a SkateConfigError" not in err, f"error: {err!r}")
+    outside = Path(tempfile.mkdtemp(prefix="gemini_pupper_outside_")) / "policy.json"
+    outside.write_text(json.dumps(_POLICY_CLIP))
+    sub = _write_skate()
+    (sub / "policies").mkdir()
+    for what, d, word in [
+        ("a policy file given as an absolute path", _write_skate(file=str(outside)), "skate folder"),
+        ("a policy file outside the skate folder (..)", _write_skate(file="../policy.json"), "skate folder"),
+        ("a policy file that is a folder", _write_skate(file="."), "not a file"),
+        ("a heading_hold of 0", _write_skate(policy={**_POLICY_CLIP, "heading_hold": 0}), "heading_hold"),
+        ("a heading_hold of []", _write_skate(policy={**_POLICY_CLIP, "heading_hold": []}), "heading_hold"),
+        ('a heading_hold of ""', _write_skate(policy={**_POLICY_CLIP, "heading_hold": ""}), "heading_hold"),
+        ("a heading_hold of false", _write_skate(policy={**_POLICY_CLIP, "heading_hold": False}), "heading_hold"),
+        ("coast_m: .inf", raw(text.replace("coast_m: 0.3", "coast_m: .inf")), "coast_m"),
+        ("travel_m_per_s: true", _write_skate(travel_m_per_s=True), "travel_m_per_s"),
+        ("speed: .nan", raw(text.replace("speed: 0.3", "speed: .nan")), "speed"),
+        ("a skate.yaml nested thousands deep", raw("policy: " + "[" * 20000 + "]" * 20000 + "\n"), "YAML"),
+        ("a policy JSON nested thousands deep", _write_skate(policy="[" * 20000 + "]" * 20000), "JSON"),
+    ]:
+        err = _load_error(d)
+        check(f"{what} is a SkateConfigError naming the key", err.startswith("skate.yaml: ") and word in err
+              and "not a SkateConfigError" not in err and "Error" not in err, f"error: {err!r}")
+    within = _write_skate(file="policies/policy.json")
+    (within / "policies").mkdir()
+    (within / "policies" / "policy.json").write_text(json.dumps(_POLICY_CLIP))
+    check("a policy file in a subfolder of the skate folder still loads", _load_error(within) == "",
+          _load_error(within))
+    check("a heading_hold of null means no hold, and loads",
+          _load_error(_write_skate(policy={**_POLICY_CLIP, "heading_hold": None})) == "")
+
+    real_load = skateboard.load_skate
+    skateboard.load_skate = lambda skate_dir=skateboard.SKATE_DIR: [][0]  # a bug in the loader: IndexError
+    try:
+        unexpected = _safe(_write_skate())
+    finally:
+        skateboard.load_skate = real_load
+    check("an unexpected exception in the loader: (None, 'skate.yaml could not be loaded', the detail)",
+          unexpected[0] is None and unexpected[1] == "skate.yaml could not be loaded"
+          and "IndexError" in (unexpected[2] or ""), f"got {unexpected}")
+    spoken_cases = [
+        ("a policy file that is not JSON", _safe(_write_skate(policy="{not json"))),
+        ("a duplicate key", _safe(raw(dup_entry))),
+        ("a missing key", _safe(_write_skate(coast_m=None))),
+        ("an unexpected exception", unexpected),
+    ]
+    for what, (_, error, detail) in spoken_cases:
+        rig = Rig(skate_error=error, skate_detail=detail)
+        try:
+            said = skateboard.not_installed_message(rig.ts.skate_error)
+            desc = {d["name"]: d for d in tools.declarations(rig.ts)}["skate_forward"]["description"]
+            placeholder = desc[desc.index("("):desc.rindex(")") + 1] if "(" in desc else desc
+            check(f"{what}: what Gemini hears is short and plain (no /, no Error, no Traceback, under 200 characters)",
+                  all("/" not in t and "Error" not in t and "Traceback" not in t and len(t) < 200
+                      for t in (said, placeholder)), f"said {said!r}; {{skate}} -> {placeholder!r}")
+            res = await rig.call("start_skating", placed=True)
+            check(f"... start_skating says it word for word", not res.ok and res.message == said, f"got {res}")
+            check("... and the log gets the full detail", any(r.levelno >= logging.ERROR and detail in r.getMessage()
+                                                           for r in rig.records), [r.getMessage() for r in rig.records])
+        finally:
+            rig.close()
 
     error = _safe(_write_spec({**good, "policy": "steer_v99"}))[1]
     rig = Rig(skate_error=error)
@@ -1598,8 +1683,8 @@ async def skate_catalogue() -> None:
 
 
 def fixture_skate() -> SkateConfig:
-    return SkateConfig(name="steer_v6", tested="robot 2026-11-26: a test entry", policy_path=Path("skate.json"), speed=0.3, carve={"gentle": 0.15, "medium": 0.3, "hard": 0.5},
-                       travel_m_per_s=0.3, turn_deg_per_s={"gentle": 0.7, "medium": 1.0, "hard": 1.9}, coast_m=0.3,
+    return SkateConfig(name="steer_v6", tested="robot 2026-11-26: a test entry", policy_path=Path("skate.json"),
+                       speed=0.3, carve={"gentle": 0.15, "medium": 0.3, "hard": 0.5}, travel_m_per_s=0.3, turn_deg_per_s={"gentle": 0.7, "medium": 1.0, "hard": 1.9}, coast_m=0.3,
                        default_seconds=3.0, max_seconds=5.0, queue_max_seconds=10.0)
 
 

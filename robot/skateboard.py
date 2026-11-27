@@ -43,6 +43,8 @@ This module has no ROS imports, so the launch file can use it too.
 from __future__ import annotations
 
 import json
+import math
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -84,7 +86,46 @@ OLD_LAYOUT_KEYS = ("travel_m_per_s", "turn_deg_per_s", "coast_m")  # top-level k
 
 
 class SkateConfigError(ValueError):
-    """skate.yaml or the policy it selects is wrong. The message names the file and the key."""
+    """skate.yaml or the policy it selects is wrong. The message is short enough for Gemini to
+    read out: "skate.yaml: " and the key, with no folder path and no Python exception text.
+    ``detail`` has the full path and the exception, for the log."""
+
+    def __init__(self, message: str, detail: str = ""):
+        super().__init__(message)
+        self.detail = detail or message
+
+
+class _DuplicateKey(Exception):
+    def __init__(self, key, line: int):
+        super().__init__(key, line)
+        self.key, self.line = key, line
+
+
+class _UniqueKeyLoader(yaml.SafeLoader):
+    """yaml.SafeLoader that refuses a key written twice in one mapping (SafeLoader keeps the last)."""
+
+
+def _unique_mapping(loader: _UniqueKeyLoader, node, deep: bool = False):
+    loader.flatten_mapping(node)
+    seen = set()
+    for key_node, _ in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        try:
+            if key in seen:
+                raise _DuplicateKey(key, key_node.start_mark.line + 1)
+            seen.add(key)
+        except TypeError:  # an unhashable key: construct_mapping refuses it as a YAML error
+            pass
+    return loader.construct_mapping(node, deep=deep)
+
+
+_UniqueKeyLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _unique_mapping)
+
+
+def _show(value) -> str:
+    """A value for an error message, cut short so the message stays short."""
+    text = repr(value)
+    return text if len(text) <= 40 else text[:37] + "..."
 
 
 def not_installed_message(error: str | None) -> str:
@@ -123,77 +164,97 @@ class SkateConfig:
 
 def load_skate(skate_dir: Path = SKATE_DIR) -> SkateConfig | None:
     """The selected policy's skate config, or None when skate.yaml is not there. Raises
-    SkateConfigError for a missing key, a value of the wrong type, numbers the policy was
-    not trained on or that are over the limits."""
+    SkateConfigError for a missing or repeated key, a value of the wrong type, numbers the
+    policy was not trained on or that are over the limits."""
     spec_path = skate_dir / "skate.yaml"
     if not spec_path.exists():
         return None
 
-    def fail(text: str):
-        raise SkateConfigError(f"{spec_path}: {text}")
+    def fail(text: str, cause: BaseException | None = None):
+        detail = f"{spec_path}: {text}" + (f" ({type(cause).__name__}: {cause})" if cause is not None else "")
+        raise SkateConfigError(f"skate.yaml: {text}", detail)
 
     try:
-        spec = yaml.safe_load(spec_path.read_text())
-    except (OSError, UnicodeDecodeError, yaml.YAMLError) as e:
-        fail(f"not readable as YAML ({type(e).__name__}: {e})")
+        spec = yaml.load(spec_path.read_text(), Loader=_UniqueKeyLoader)
+    except _DuplicateKey as e:
+        fail(f"the key {e.key} is written twice; keep one", e)
+    except (OSError, UnicodeDecodeError, yaml.YAMLError, RecursionError) as e:
+        fail("is not valid YAML", e)
     if not isinstance(spec, dict):
-        fail("empty, or not a mapping of the fields in robot/skateboard.py")
+        fail("empty, or not a mapping of the fields in skateboard.py")
     if any(k in spec for k in OLD_LAYOUT_KEYS) or str(spec.get("policy", "")).endswith(".json"):
         fail("skate.yaml uses the old single-policy layout; see skate/README.md")
 
     def num(table: dict, key: str, where: str = "") -> float:
         if key not in table:
             fail(f"missing {where}{key}")
+        value = table[key]
+        if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+            fail(f"{where}{key} must be a number, not {_show(value)}")
         try:
-            return float(table[key])
-        except (TypeError, ValueError):
-            fail(f"{where}{key} must be a number, not {table[key]!r}")
+            number = float(value)
+        except ValueError:
+            fail(f"{where}{key} must be a number, not {_show(value)}")
+        if not math.isfinite(number):
+            fail(f"{where}{key} must be a finite number, not {_show(value)}")
+        return number
 
     def sharp(table: dict, key: str, where: str = "") -> dict[str, float]:
         """A gentle / medium / hard table of numbers."""
         value = table.get(key)
         if not isinstance(value, dict):
-            fail(f"{where}{key} must be a mapping of {list(SHARPNESS)}, not {value!r}")
+            fail(f"{where}{key} must be a mapping of {', '.join(SHARPNESS)}, not {_show(value)}")
         missing = [s for s in SHARPNESS if s not in value]
         if missing:
-            fail(f"{where}{key} needs {list(SHARPNESS)}; missing {missing}")
+            fail(f"{where}{key} needs {', '.join(SHARPNESS)}; missing {', '.join(missing)}")
         return {s: num(value, s, f"{where}{key} ") for s in SHARPNESS}
 
     if "policy" not in spec:
         fail("missing policy")
     name = spec["policy"]
     if not isinstance(name, str):
-        fail(f"policy must be the name of an entry under policies, not {name!r}")
+        fail(f"policy must be the name of an entry under policies, not {_show(name)}")
     catalogue = spec.get("policies")
     if not isinstance(catalogue, dict) or not catalogue:
-        fail(f"policies must be a mapping of policy names to entries, not {catalogue!r}")
+        fail(f"policies must be a mapping of policy names to entries, not {_show(catalogue)}")
     if name not in catalogue:
-        fail(f"policy {name!r} is not one of {', '.join(map(str, catalogue))}")
+        fail(f"policy {_show(name)} is not one of {', '.join(map(str, catalogue))}")
     entry = catalogue[name]
     at = f"policies.{name}."
     if not isinstance(entry, dict):
-        fail(f"policies.{name} must be a mapping (file, tested and the sim estimates), not {entry!r}")
+        fail(f"policies.{name} must be a mapping (file, tested and the sim estimates), not {_show(entry)}")
     for key in ("file", "tested"):
-        if not isinstance(entry.get(key), str) or not entry[key].strip():
-            fail(f"{at}{key} must be text, not {entry.get(key)!r}" if key in entry else f"missing {at}{key}")
-    policy_path = skate_dir / entry["file"]
+        if key not in entry:
+            fail(f"missing {at}{key}")
+        if not isinstance(entry[key], str) or not entry[key].strip():
+            fail(f"{at}{key} must be text, not {_show(entry[key])}")
+    # In the skate folder, checked on the path as written (a symlinked folder is fine).
+    rel = os.path.normpath(entry["file"])
+    if os.path.isabs(rel) or rel == ".." or rel.startswith(".." + os.sep):
+        fail(f"{at}file must be a path inside the skate folder")
+    policy_path = skate_dir / rel
+    shown = policy_path.name
+    if not policy_path.exists():
+        fail(f"{at}file: the policy {shown} is not there; copy it into the skate folder (see the skate README)")
     if not policy_path.is_file():
-        fail(f"{at}file: the policy {policy_path.name} is not in {policy_path.parent}; copy it there"
-             " (see skate/README.md)")
+        fail(f"{at}file: {entry['file']!r} is not a file")
     try:
         policy = json.loads(policy_path.read_text())
-    except (OSError, UnicodeDecodeError, ValueError) as e:
-        fail(f"{at}file: the policy {policy_path.name} is not readable as JSON ({type(e).__name__}: {e})")
+    except (OSError, UnicodeDecodeError, ValueError, RecursionError) as e:
+        fail(f"{at}file: the policy {shown} is not valid JSON", e)
     if not isinstance(policy, dict):
-        fail(f"{at}file: the policy {policy_path.name} is not a JSON object, so it is not a policy")
+        fail(f"{at}file: the policy {shown} is not a JSON object, so it is not a policy")
     clip = policy.get("command_clip")
     if not isinstance(clip, dict) or not all(
             isinstance(clip.get(k), list) and len(clip[k]) == 2
-            and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in clip[k]) for k in ("vx", "wz")):
-        fail(f"{at}file: the policy {policy_path.name} has no command_clip with vx and wz ranges")
-    hold = policy.get("heading_hold") or {}
+            and all(isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) for v in clip[k])
+            for k in ("vx", "wz")):
+        fail(f"{at}file: the policy {shown} has no command_clip with vx and wz ranges")
+    hold = policy.get("heading_hold", {})
+    if hold is None:  # JSON null: no heading hold
+        hold = {}
     if not isinstance(hold, dict):
-        fail(f"{at}file: the policy {policy_path.name}'s heading_hold must be a mapping, not {hold!r}")
+        fail(f"{at}file: the policy {shown}'s heading_hold must be a mapping, not {_show(hold)}")
     speed = num(spec, "speed")
     top_speed = max(clip["vx"])
     if not 0.0 < speed <= top_speed + 1e-6:
@@ -201,8 +262,7 @@ def load_skate(skate_dir: Path = SKATE_DIR) -> SkateConfig | None:
     if speed > MAX_SPEED + 1e-6:
         fail(f"speed {speed:g} is over the {MAX_SPEED:g} m/s ceiling")
     carve = sharp(spec, "carve")
-    lowest = num(hold, "yaw_threshold", f"the policy {policy_path.name}'s heading_hold ") if "yaw_threshold" in hold \
-        else 0.0
+    lowest = num(hold, "yaw_threshold", f"the policy {shown}'s heading_hold ") if "yaw_threshold" in hold else 0.0
     lowest += CARVE_MARGIN
     top_carve = min(abs(clip["wz"][0]), abs(clip["wz"][1]))
     for s, wz in carve.items():
@@ -212,7 +272,8 @@ def load_skate(skate_dir: Path = SKATE_DIR) -> SkateConfig | None:
         if wz > MAX_CARVE + 1e-6:
             fail(f"carve {s} {wz:g} is over the {MAX_CARVE:g} rad/s ceiling")
     if not carve["gentle"] < carve["medium"] < carve["hard"]:
-        fail(f"carve must get sharper from gentle to medium to hard, not {carve}")
+        fail("carve must get sharper from gentle to medium to hard, not "
+             + ", ".join(f"{s} {v:g}" for s, v in carve.items()))
     turn = sharp(entry, "turn_deg_per_s", at)
     travel, coast = num(entry, "travel_m_per_s", at), num(entry, "coast_m", at)
     estimates = {"travel_m_per_s": travel, "coast_m": coast, **{f"turn_deg_per_s {s}": v for s, v in turn.items()}}
@@ -233,16 +294,17 @@ def load_skate(skate_dir: Path = SKATE_DIR) -> SkateConfig | None:
                        max_seconds=max_s, queue_max_seconds=queue_s)
 
 
-def load_skate_safe(skate_dir: Path = SKATE_DIR) -> tuple[SkateConfig | None, str | None]:
-    """load_skate that never raises, for the robot and the launch file: (config, None);
-    (None, None) when skate.yaml is not there; (None, the error) when it is wrong, so
-    skate mode is off but the rest of the robot still starts."""
+def load_skate_safe(skate_dir: Path = SKATE_DIR) -> tuple[SkateConfig | None, str | None, str | None]:
+    """load_skate that never raises, for the robot and the launch file. Returns (config, error,
+    detail): (config, None, None); (None, None, None) when skate.yaml is not there; or (None, the
+    short error Gemini may read, the full detail for the log) when it is wrong, so skate mode is
+    off but the rest of the robot still starts."""
     try:
-        return load_skate(skate_dir), None
+        return load_skate(skate_dir), None, None
     except SkateConfigError as e:
-        return None, str(e)
+        return None, str(e), e.detail
     except Exception as e:  # a bug in the checks above must not stop the robot either
-        return None, f"{skate_dir / 'skate.yaml'}: could not be loaded ({type(e).__name__}: {e})"
+        return None, "skate.yaml could not be loaded", f"{skate_dir / 'skate.yaml'}: {type(e).__name__}: {e!r}"
 
 
 def skate_controller_params(cfg: SkateConfig, base: dict) -> dict:
