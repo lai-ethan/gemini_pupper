@@ -30,7 +30,8 @@ from skateboard import FELL_ON_BOARD_MESSAGE, MIN_RIDE_S, SHARPNESS, SKATE_CONTR
 from tool_registry import Param, tool
 
 PLACEMENT = ("Pupper beside the board on the board's right, body parallel to it and facing the end with the castle"
-             " picture, left feet on the middle of the deck, right feet on the floor, a hand on the harness")
+             " picture, left feet on the deck's middle line, one ahead of the middle and one behind, right feet on the"
+             " floor, a hand on the harness")
 NOT_SKATING = ("Pupper is not in skate mode. A person places it on the board first (" + PLACEMENT
                + "); then call start_skating with placed=true")
 
@@ -140,12 +141,17 @@ async def end_skating(robot: Robot, held: bool) -> Result:
 
 
 # ============================================================ what Gemini reads
+def start_skating_description(wait_s: float) -> str:
+    """start_skating's description, with the wait for the policy to fade in (WALK_READY_S)."""
+    return ("Start skate mode. Pupper cannot climb onto the skateboard: a person places it first (" + PLACEMENT + ")."
+            " Pupper must be relaxed (call lie_down first if it is standing). Ask the person to place it, wait until"
+            f" they say it is done, and only then call this with placed=true. It takes about {wait_s:.0f} s; then"
+            " Pupper balances on the board without rolling. {skate}")
+
+
 @tool(
     "start_skating",
-    "Start skate mode. Pupper cannot climb onto the skateboard: a person places it first (" + PLACEMENT + ")."
-    " Pupper must be relaxed (call lie_down first if it is standing). Ask the person to place it, wait until they"
-    f" say it is done, and only then call this with placed=true. It takes about {WALK_READY_S:.0f} s; then Pupper"
-    " balances on the board without rolling. {skate}",
+    start_skating_description(WALK_READY_S),
     placed=Param("boolean", "true only if a person has just said Pupper is placed on the board. Never guess."),
 )
 async def start_skating_tool(robot: Robot, placed: bool) -> Result:

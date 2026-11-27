@@ -1716,6 +1716,15 @@ async def skate_robot() -> None:
         want = ("mode: skating (policy steer_v6): on the skateboard in skate mode (skate_forward and skate_turn ride it;"
                 " end_skating relaxes the motors to get off)")
         check("... and names the loaded policy", res.message == want, res.message, passes=want)
+        cfg, rig.ts.skate = rig.ts.skate, None  # the controller left active, but this server's skate.yaml did not load
+        try:
+            res = await rig.ts.mode()
+            check("... with no skate config loaded, it still says skating, without a policy",
+                  res.ok and "skating" in res.message and "(policy" not in res.message, res.message)
+        except Exception as e:  # noqa: BLE001
+            check("... with no skate config loaded, it still says skating, without a policy", False, f"raised {e!r}")
+        finally:
+            rig.ts.skate = cfg
         res = await rig.ts.switch_to(LOCOMOTION_CONTROLLER)
         check("on the board, the walking policy is refused", not res.ok and "skateboard" in res.message, f"got {res}")
         check("... and nothing switched", rig.robot.active() & rig.ts.leg_controllers == {SKATE_CONTROLLER}
@@ -1820,7 +1829,8 @@ async def skate_tools() -> None:
         rig.close()
 
     placement = ("Pupper beside the board on the board's right, body parallel to it and facing the end with the castle"
-                 " picture, left feet on the middle of the deck, right feet on the floor, a hand on the harness")
+                 " picture, left feet on the deck's middle line, one ahead of the middle and one behind, right feet on"
+                 " the floor, a hand on the harness")
     got = behaviors.PLACEMENT
     check("PLACEMENT says where Pupper stands on the board", got == placement, got, passes=placement)
 
@@ -1830,6 +1840,9 @@ async def skate_tools() -> None:
         start_text = decls["start_skating"]["description"]
         check("start_skating's description gives the wait from WALK_READY_S",
               f"about {WALK_READY_S:.0f} s" in start_text, start_text)
+        other = behaviors.start_skating_description(7.0)
+        check("... and the number follows the wait (7 s gives about 7 s)", "about 7 s" in other and "about 4 s" not in other,
+              other)
         stop_text = decls["stop"]["description"]
         check("stop's description says that on the skateboard it stops the pushing and the board rolls on",
               "skateboard" in stop_text and "pushing" in stop_text and "rolls on" in stop_text, stop_text)
@@ -1966,6 +1979,17 @@ async def skate_tools() -> None:
     check("... and that distances are estimates and the path must be clear", "estimate" in text and "clear" in text)
     check('... where Pupper stands ("beside the board", "castle")', "beside the board" in text and "castle" in text, text)
     check('... and that long rides drift ("drift")', "drift" in text, text)
+    flat = " ".join(text.split())
+    placed = ("a person has to place you: beside the board on its right, facing the end with the castle picture, your"
+              " left feet on the deck's middle line, one ahead of the middle and one behind, and your right feet on the"
+              " floor.")
+    check("... the placement sentence is exact", placed in flat, flat[:400], passes=placed)
+    drift = ("on a long ride you also drift a little to one side, so keep rides short. if the board has wandered, call"
+             " stop first, then ask a person to hold you and straighten the board.")
+    check("... the drift sentence is exact", drift in flat, flat, passes=drift)
+    sentence = next((s for s in re.split(r"(?<=\.) ", flat) if "wandered" in s), "")
+    check('... and before anyone straightens the board, it says "call stop first"', "call stop first" in sentence,
+          sentence)
     queued = re.search(r"at most (\d+(?:\.\d+)?) s of riding", text)
     limit = yaml.safe_load((skateboard.SKATE_DIR / "skate.yaml").read_text())["queue_max_seconds"]
     check("... and its queue limit is skate.yaml's queue_max_seconds", bool(queued) and float(queued[1]) == float(limit),
