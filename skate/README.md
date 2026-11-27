@@ -12,7 +12,8 @@ Tools: `lab/part8_skate.py`. Numbers: `skate.yaml`. Config loader:
   `coast_m`). `policy:` names the one entry the robot runs; only that entry
   is loaded, and no tool lets Gemini change it.
 - `policies/` holds copies of pupper-mjlab's `skateboard/policies/` files
-  (steer v6 and steer v10, the two catalogue entries). To change policy, set
+  (steer v6, steer v10 and steer v13, the three catalogue entries; v13 has only
+  been run in simulation, never on the robot). To change policy, set
   `policy:` to another name and restart the robot stack. To add one, copy the
   file into `policies/`, add an entry and measure its estimates with
   pupper-mjlab's `skateboard/tools/timed_ride.py`. A new policy needs a TA's

@@ -26,3 +26,12 @@ policies:
     travel_m_per_s: 0.30
     turn_deg_per_s: {gentle: 0.8, medium: 0.9, hard: 1.1}
     coast_m: 0.2
+  # v13: trained to hold its line better. In sim its sideways drift over a
+  # 25 s ride is spread about half as wide as v10's, but it still drifts to
+  # one side. Provisional.
+  steer_v13:
+    file: policies/split_steer_v13_max0.3_policy.json
+    tested: "sim only: not run on the robot"
+    travel_m_per_s: 0.29
+    turn_deg_per_s: {gentle: 1.1, medium: 1.1, hard: 1.4}
+    coast_m: 0.2

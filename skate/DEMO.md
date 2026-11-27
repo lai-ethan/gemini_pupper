@@ -38,7 +38,7 @@ Read this first:
       gave it, when, and for which file.
 - [ ] **`policy:` in `skate.yaml`** names the policy for the demo
       (`steer_v6` now). See "Changing policy". Steer v6 is the one to run
-      first; steer v10 is provisional.
+      first; steer v10 is provisional; steer v13 has only run in simulation.
 - [ ] **`python3 lab/test.py skate` passes**, on the robot's copy of the
       repo, after the last `git pull`.
 - [ ] pupper-mjlab's `skateboard/HARDWARE_TEST.md` says voice control (its
@@ -136,11 +136,11 @@ the policy a stance it never trained on.
 One person talks; one holds the harness; one holds the gamepad e-stop. The
 estimates Gemini reads depend on the policy loaded:
 
-| | steer_v6 | steer_v10 |
-| --- | --- | --- |
-| "go forward" (3 s, the default) | about 0.9 m forward | about 0.9 m forward |
-| "turn left gently" (3 s) | about 3 degrees | about 2 degrees |
-| the board rolls on after the last push | about 0.1 m | about 0.2 m |
+| | steer_v6 | steer_v10 | steer_v13 |
+| --- | --- | --- | --- |
+| "go forward" (3 s, the default) | about 0.9 m forward | about 0.9 m forward | about 0.9 m forward |
+| "turn left gently" (3 s) | about 3 degrees | about 2 degrees | about 3 degrees |
+| the board rolls on after the last push | about 0.1 m | about 0.2 m | about 0.2 m |
 
 These are `travel_m_per_s × 3`, `turn_deg_per_s.gentle × 3` and `coast_m` from
 `skate.yaml`, rounded the way the tool replies round them. All sim estimates.
@@ -234,17 +234,17 @@ Stop testing and let the motors cool if Pupper is hot or a motor faults.
 No tool lets Gemini change the policy. Each new policy file needs a TA's OK
 before its first run on the robot.
 
-| | steer_v6 | steer_v10 |
-| --- | --- | --- |
-| File | `policies/split_steer_v6_max0.3_policy.json` | `policies/split_steer_v10_max0.3_policy.json` |
-| On the robot (`tested`) | 2026-11-26: rolled forward on carpet by gamepad; not measured | 2026-11-26: rolled forward on carpet by gamepad; not measured |
-| Through Gemini Pupper | never | never |
-| Sim: travel | 0.29 m per second of riding | 0.30 m per second of riding |
-| Sim: turn, gentle / medium / hard | 1.1 / 1.4 / 2.2 degrees per second | 0.8 / 0.9 / 1.1 degrees per second |
-| Sim: roll after the last push | 0.1 m | 0.2 m |
-| Note | the one to run first | provisional: missed its sim bar at x10 wheel drag |
+| | steer_v6 | steer_v10 | steer_v13 |
+| --- | --- | --- | --- |
+| File | `policies/split_steer_v6_max0.3_policy.json` | `policies/split_steer_v10_max0.3_policy.json` | `policies/split_steer_v13_max0.3_policy.json` |
+| On the robot (`tested`) | 2026-11-26: rolled forward on carpet by gamepad; not measured | 2026-11-26: rolled forward on carpet by gamepad; not measured | sim only: not run on the robot |
+| Through Gemini Pupper | never | never | never |
+| Sim: travel | 0.29 m per second of riding | 0.30 m per second of riding | 0.29 m per second of riding |
+| Sim: turn, gentle / medium / hard | 1.1 / 1.4 / 2.2 degrees per second | 0.8 / 0.9 / 1.1 degrees per second | 1.1 / 1.1 / 1.4 degrees per second |
+| Sim: roll after the last push | 0.1 m | 0.2 m | 0.2 m |
+| Note | the one to run first | provisional: missed its sim bar at x10 wheel drag | provisional, sim only: holds its line better (sideways drift over a 25 s ride about half as wide as v10's, still to one side); needs a TA's OK and the student's OK before its first run, like any new policy |
 
-Not tested on either: steering on the robot, any distance or turn, a hard
+Not tested on any of them: steering on the robot, any distance or turn, a hard
 floor, the voice tools.
 
 ## Limits
