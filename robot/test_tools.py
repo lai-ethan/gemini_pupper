@@ -2404,6 +2404,153 @@ async def skate_guards() -> None:
         rig.close()
 
 
+async def _ride_mid(rig: Rig, tool: str, args: dict) -> None:
+    """Queue a ride and let it run for a moment (about 2 s of fake time), without waiting for it to end."""
+    await tools.call(rig.ts, tool, args)
+    for _ in range(40):
+        await _real_sleep(0)
+
+
+def _rides(twists) -> list[tuple[float, float]]:
+    """Each run of non-zero speed commands, as (start, end): end is the next zero command
+    (inf if none came, so a ride left running counts as too long)."""
+    runs, start = [], None
+    for t, m in twists:
+        moving = abs(m.linear.x) + abs(m.linear.y) + abs(m.angular.z) > 1e-9
+        if moving and start is None:
+            start = t
+        elif not moving and start is not None:
+            runs.append((start, t))
+            start = None
+    if start is not None:
+        runs.append((start, math.inf))
+    return runs
+
+
+async def _demo(cfg: SkateConfig) -> None:
+    """The live demo, line by line, on the fake robot, for one catalogue entry."""
+    p = f"[{cfg.name}]"
+    rig = Rig(skate=cfg)
+    try:
+        # 1. A person lies Pupper down and places it; Gemini starts skate mode.
+        await rig.call("lie_down")
+        check(f"{p} 1. Pupper starts from motors idle", rig.ts.state_now == robot_api.MOTORS_IDLE, f"state {rig.ts.state_now}")
+        res = await rig.call("start_skating", placed=False)
+        check(f"{p} 1. start_skating(placed=false) is refused with the placement text",
+              not res.ok and behaviors.PLACEMENT in res.message and not rig.robot.activations(SKATE_CONTROLLER), f"got {res}")
+        res = await rig.call("start_skating", placed=True)
+        check(f"{p} 1. start_skating(placed=true) starts skate mode", res.ok and rig.ts.state_now == SKATING
+              and SKATE_CONTROLLER in rig.robot.active(), f"got {res}; state {rig.ts.state_now}")
+        res = await rig.call("robot_status")
+        check(f"{p} 1. robot_status says skating and names the policy",
+              "skating" in res.message and f"(policy {cfg.name})" in res.message, res.message)
+
+        # 2. Walking on the board.
+        switches = len(rig.robot.switches)
+        for name, args in [("move", {"direction": "forward", "speed": 0.3, "duration": 2}), ("stand_up", {})]:
+            res = await rig.call(name, **args)
+            check(f"{p} 2. {name} is refused with the on-board message", not res.ok
+                  and skateboard.ON_BOARD_MESSAGE in res.message and len(rig.robot.switches) == switches, f"got {res}")
+
+        # 3. "Go forward."
+        mark = len(rig.robot.twists())
+        res = await rig.call("skate_forward")
+        ride = _rides(rig.robot.twists()[mark:])
+        metres = f"about {cfg.travel_m_per_s * cfg.default_seconds:.1f} m forward"
+        check(f"{p} 3. skate_forward rides default_seconds ({cfg.default_seconds:g} s)", res.ok and len(ride) == 1
+              and abs(ride[0][1] - ride[0][0] - cfg.default_seconds) < 0.06, f"got {res}; rides {ride}")
+        check(f"{p} 3. ... and its reply gives travel_m_per_s x default_seconds ({metres}) as an estimate",
+              metres in res.message and "Estimate" in res.message, res.message, passes=metres)
+
+        # 4. "Turn left gently."
+        mark = len(rig.robot.twists())
+        res = await rig.call("skate_turn", direction="left", sharpness="gentle", seconds=3)
+        ride = _rides(rig.robot.twists()[mark:])
+        degrees = f"curving left by about {cfg.turn_deg_per_s['gentle'] * 3:.0f} degrees"
+        check(f"{p} 4. skate_turn left gentle 3 s rides, carving at +{cfg.carve['gentle']:g} rad/s", res.ok and len(ride) == 1
+              and all(abs(m.angular.z - cfg.carve["gentle"]) < 1e-3 for _, m in _ride_twists(rig, mark)), f"got {res}")
+        check(f"{p} 4. ... and its reply gives turn_deg_per_s gentle x 3 ({degrees})", degrees in res.message
+              and "Estimate" in res.message, res.message, passes=degrees)
+
+        # 5. "Stop" in the middle of a ride.
+        mark = len(rig.robot.twists())
+        await _ride_mid(rig, "skate_forward", {"seconds": 5})
+        res = await rig.call("stop")
+        ride = _rides(rig.robot.twists()[mark:])
+        last = rig.robot.twists()[-1][1]
+        check(f"{p} 5. stop mid-ride cuts the 5 s ride short", res.ok and len(ride) == 1 and ride[0][1] - ride[0][0] < 4.5,
+              f"got {res}; rides {ride}")
+        check(f"{p} 5. ... the last command sent is zero", last.linear.x == 0 and last.linear.y == 0
+              and last.angular.z == 0, f"last vx {last.linear.x:g}, wz {last.angular.z:g}")
+        check(f"{p} 5. ... and the skate controller still holds the legs", rig.ts.state_now == SKATING
+              and rig.robot.active() & rig.ts.leg_controllers == {SKATE_CONTROLLER}, f"active {rig.robot.active()}")
+
+        # 6. The gamepad e-stop while riding, then back on.
+        await _ride_mid(rig, "skate_forward", {"seconds": 5})
+        rig.robot.send("/emergency_stop", _DataMsg())
+        await rig.settle()
+        check(f"{p} 6. gamepad e-stop while riding: motors relaxed", rig.ts.state_now == robot_api.MOTORS_IDLE
+              and not rig.robot.active() & rig.ts.leg_controllers, f"active {rig.robot.active()}")
+        res = await rig.call("stand_up")
+        check(f"{p} 6. ... stand_up is refused (still on the board)", not res.ok and "skateboard" in res.message
+              and not rig.robot.active() & rig.ts.leg_controllers, f"got {res}")
+        res = await rig.call("start_skating", placed=True)
+        check(f"{p} 6. ... start_skating(placed=true) works again", res.ok and rig.ts.state_now == SKATING
+              and SKATE_CONTROLLER in rig.robot.active(), f"got {res}; state {rig.ts.state_now}")
+
+        # 7. A tilt fall while skating: the skate policy's tilt e-stop.
+        await rig.ts.wait(3.0)  # past the gamepad e-stop's 2 s window
+        await _ride_mid(rig, "skate_forward", {"seconds": 5})
+        rig.imu(tilt_deg=60)
+        rig.robot.send("/rosout", _Msg(name=SKATE_CONTROLLER, msg=robot_api.ESTOP_LOG))
+        await rig.settle()
+        check(f"{p} 7. a tilt fall while skating is a fall from the board", rig.ts.state_now == robot_api.FALLEN
+              and rig.ts.fell_off_board, f"state {rig.ts.state_now}; fell_off_board {rig.ts.fell_off_board}")
+        switches = len(rig.robot.switches)
+        res = await rig.call("move", direction="forward", speed=0.3, duration=2)
+        check(f"{p} 7. ... walking is refused", not res.ok and "skateboard" in res.message
+              and len(rig.robot.switches) == switches, f"got {res}")
+        res = await rig.call("end_skating", held=False)
+        check(f"{p} 7. ... end_skating(held=false) is refused", not res.ok and "hold" in res.message
+              and len(rig.robot.switches) == switches, f"got {res}")
+        res = await rig.call("end_skating", held=True)
+        check(f"{p} 7. ... end_skating(held=true) relaxes the motors", res.ok and rig.ts.state_now == robot_api.MOTORS_IDLE
+              and not rig.ts.fell_off_board and not rig.robot.active() & rig.ts.leg_controllers,
+              f"got {res}; state {rig.ts.state_now}")
+        rig.imu(tilt_deg=3)  # a person sets Pupper upright on the floor
+        res = await rig.call("stand_up")
+        check(f"{p} 7. ... set upright on the floor, stand_up works", res.ok and rig.ts.state_now == LOCOMOTION, f"got {res}")
+
+        # 8. Every command sent while on the board stayed inside the limits.
+        sent = [m for _, m in rig.robot.twists()]
+        rides = _rides(rig.robot.twists())
+        check(f"{p} 8. no command was over 0.3 m/s or a yaw of 0.5 rad/s, or sideways",
+              bool(sent) and all(m.linear.x <= 0.3 + 1e-9 and abs(m.angular.z) <= 0.5 + 1e-6 and m.linear.y == 0 for m in sent),
+              f"max vx {max(m.linear.x for m in sent):g}; max |wz| {max(abs(m.angular.z) for m in sent):g}")
+        check(f"{p} 8. ... no ride lasted over 5 s, and each ended with a zero command",
+              len(rides) == 5 and all(end - start <= 5.0 + 1e-6 for start, end in rides),
+              f"rides (s): {[round(end - start, 2) for start, end in rides]}")
+    except Exception as e:  # noqa: BLE001
+        check(f"{p} the demo ran to the end", False, f"raised {type(e).__name__}: {e}")
+    finally:
+        rig.close()
+
+
+async def skate_demo() -> None:
+    print("Skate: the live demo, scripted, for every policy in skate/skate.yaml")
+    spec = yaml.safe_load((skateboard.SKATE_DIR / "skate.yaml").read_text())
+    for name in spec["policies"]:
+        d = Path(tempfile.mkdtemp(prefix="gemini_pupper_skate_"))
+        (d / "skate.yaml").write_text(yaml.safe_dump({**spec, "policy": name}))
+        (d / "policies").symlink_to(skateboard.SKATE_DIR / "policies")
+        err = _load_error(d)
+        if not check(f"[{name}] the catalogue entry loads", not err, f"error: {err!r}"):
+            continue
+        before = FAIL
+        await _demo(load_skate(d))
+        check(f"[{name}] the whole demo passes", FAIL == before, f"{FAIL - before} step(s) failed for {name}")
+
+
 def walk_twists_since(rig: Rig, start: int):
     return [m for _, m in rig.robot.twists()[start:] if abs(m.linear.x) + abs(m.linear.y) + abs(m.angular.z) > 1e-9]
 
@@ -2414,6 +2561,7 @@ GROUPS = {
     "todo7": todo7, "todo8": todo8, "todo9": todo9, "todo10": todo10, "todo11": todo11, "robot": provided,
     "optional_jump": optional_jump, "skate_config": skate_config, "skate_robot": skate_robot,
     "skate_tools": skate_tools, "skate_guards": skate_guards, "skate_catalogue": skate_catalogue,
+    "skate_demo": skate_demo,
 }
 OPT_IN = {"optional_jump"}  # run only when asked for by name
 PARTS = {
@@ -2423,7 +2571,7 @@ PARTS = {
     "part4": ["todo7", "todo8"],
     "part5": ["todo9", "todo10"],
     "part7": ["todo11"],
-    "skate": ["skate_config", "skate_catalogue", "skate_robot", "skate_tools", "skate_guards"],
+    "skate": ["skate_config", "skate_catalogue", "skate_robot", "skate_tools", "skate_guards", "skate_demo"],
 }
 
 
