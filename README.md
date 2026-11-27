@@ -76,6 +76,9 @@ robot/start.sh            # robot only; open the app from your laptop (below)
 robot/stop.sh             # relax the motors and stop everything
 ```
 
+On the skateboard, get Pupper off the board first (`skate/DEMO.md`):
+`stop.sh` lets the legs go limp.
+
 From your laptop: `ssh -N -L 8000:localhost:8000 pi@pupper<N>.local`, then
 open http://localhost:8000, open **Settings**, paste your key and press
 **WAKE PUPPER**. The debug view shows every tool call and its result.
@@ -103,6 +106,9 @@ python3 lab/chat.py --robot    # your tools on the real Pupper (through the robo
 | `lab/prompt.md` | try it in text (`python3 lab/chat.py`), then reconnect in the app |
 | a `.py` file in `lab/` | `python3 lab/test.py`, try it in text, then `robot/stop.sh && robot/start.sh` |
 | a trick (`get_trick.py` or a `trick.yaml`) | `robot/stop.sh && robot/start.sh` |
+
+If Pupper is on the skateboard, get it off the board before `robot/stop.sh`
+(see `skate/DEMO.md`): stopping the software lets the legs go limp.
 
 ## Tricks
 

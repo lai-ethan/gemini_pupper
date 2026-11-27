@@ -1653,6 +1653,21 @@ async def skate_catalogue() -> None:
     check("a heading_hold yaw_threshold of 0 still loads", _load_error(_write_skate(policy=hold(0.0))) == "",
           _load_error(_write_skate(policy=hold(0.0))))
 
+    # Re-review: the policy's command clip must allow both carve directions and the configured speed.
+    def clip(vx, wz) -> dict:
+        return {**_POLICY_CLIP, "command_clip": {"vx": vx, "vy": [0.0, 0.0], "wz": wz}}
+
+    for what, d, words in [
+        ("a yaw clip of [-0.6, -0.6] (one side only)", _write_skate(policy=clip([0.0, 0.3], [-0.6, -0.6])), ("wz",)),
+        ("a yaw clip of [0.1, 0.6] (no right turns)", _write_skate(policy=clip([0.0, 0.3], [0.1, 0.6])), ("wz",)),
+        ("a yaw clip written high to low, [0.6, -0.6]", _write_skate(policy=clip([0.0, 0.3], [0.6, -0.6])), ("wz",)),
+        ("a speed clip that starts above the speed, [0.31, 0.5]", _write_skate(policy=clip([0.31, 0.5], [-0.6, 0.6])),
+         ("speed",)),
+    ]:
+        err = _load_error(d)
+        check(f"{what} is refused, short and plain", err.startswith("skate.yaml: ") and all(w in err for w in words)
+              and "/" not in err.replace("m/s", "") and "Error" not in err and len(err) < 160, f"error: {err!r}")
+
     # Final review: what a bad config says stays short and is read out plainly.
     old_said = _load_error(bad_cases[0][1])
     check("the old-layout error names skate.yaml once and reads no path aloud",
@@ -1752,6 +1767,7 @@ async def skate_running_policy() -> None:
         ("there is no parameter file (not started by this repo's launch, or a desk test)", None, True),
         ("the parameter file is not valid YAML", garbled, False),
         ("the parameter file cannot be read (a folder)", folder, False),
+        ("the parameter file's model_path has a NUL character", _param_file("bad\x00path.json"), False),
     ]:
         rig = Rig(skate=cfg, param_file=param_file)
         try:

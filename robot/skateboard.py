@@ -252,6 +252,8 @@ def load_skate(skate_dir: Path = SKATE_DIR) -> SkateConfig | None:
             and all(isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) for v in clip[k])
             for k in ("vx", "wz")):
         fail(f"{at}file: the policy {shown} has no command_clip with vx and wz ranges")
+    if not clip["wz"][0] < 0.0 < clip["wz"][1]:  # else its clip could turn a left carve into a right one
+        fail(f"{at}file: the policy {shown}'s command_clip wz must go from below 0 to above 0, not {_show(clip['wz'])}")
     hold = policy.get("heading_hold", {})
     if hold is None:  # JSON null: no heading hold
         hold = {}
@@ -259,8 +261,8 @@ def load_skate(skate_dir: Path = SKATE_DIR) -> SkateConfig | None:
         fail(f"{at}file: the policy {shown}'s heading_hold must be a mapping, not {_show(hold)}")
     speed = num(spec, "speed")
     top_speed = max(clip["vx"])
-    if not 0.0 < speed <= top_speed + 1e-6:
-        fail(f"speed {speed:g} must be above 0 and at most {top_speed:g} m/s, the policy's clip")
+    if not 0.0 < speed <= top_speed + 1e-6 or speed < min(clip["vx"]) - 1e-6:
+        fail(f"speed {speed:g} must be above 0 and inside the policy's clip, {min(clip['vx']):g} to {top_speed:g} m/s")
     if speed > MAX_SPEED + 1e-6:
         fail(f"speed {speed:g} is over the {MAX_SPEED:g} m/s ceiling")
     carve = sharp(spec, "carve")
@@ -337,7 +339,11 @@ def running_policy_error(cfg: SkateConfig, param_file: Path) -> tuple[str | None
     loaded = loaded.get("model_path") if isinstance(loaded, dict) else None
     if not isinstance(loaded, str):
         return RESTART_NEEDED, f"{param_file} has no {SKATE_CONTROLLER} model_path: the launch loaded no skate policy"
-    if os.path.realpath(loaded) != os.path.realpath(cfg.policy_path):
+    try:
+        same = os.path.realpath(loaded) == os.path.realpath(cfg.policy_path)
+    except (OSError, ValueError) as e:  # e.g. a NUL character in the path
+        return UNCHECKED, f"{param_file}: could not read its {SKATE_CONTROLLER} model_path ({type(e).__name__}: {e})"
+    if not same:
         return RESTART_NEEDED, (f"{param_file}: {SKATE_CONTROLLER} was loaded with {loaded}, but skate.yaml now"
                                 f" selects {cfg.name} ({cfg.policy_path})")
     return None, f"{SKATE_CONTROLLER} was loaded with {cfg.name} ({cfg.policy_path}), the policy skate.yaml selects"

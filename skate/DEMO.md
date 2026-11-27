@@ -111,6 +111,13 @@ Read this first:
      robot started, or that the server can't tell which skate policy is
      loaded, means the skate controller may hold another policy: run
      `robot/stop.sh` and `robot/start.sh` the same way.
+   - If any such error shows while Pupper is on the board (the skate
+     controller can still hold the legs with skate mode off): a person
+     holds Pupper, then say "end skating" and confirm the hold (it relaxes
+     the skate controller), or press the gamepad e-stop. Riding, walking
+     and tricks are refused meanwhile, and `robot_status` says skate mode
+     is off and the skate controller still holds the legs. Lift Pupper off the
+     board, then `robot/stop.sh` and `robot/start.sh`.
 
 ## Placement
 
