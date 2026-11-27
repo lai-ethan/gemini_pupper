@@ -1698,7 +1698,7 @@ async def skate_catalogue() -> None:
     rig = Rig(skate_error=error)
     try:
         check("a robot with a broken skate config starts, with skate mode off and the error kept",
-              rig.ts.skate is None and rig.ts.skate_error == error and SKATE_CONTROLLER not in rig.ts.leg_controllers,
+              rig.ts.skate is None and rig.ts.skate_error == error,
               f"skate {rig.ts.skate}; skate_error {getattr(rig.ts, 'skate_error', 'missing')!r}")
         check("... and it logs the error", any(r.levelno >= logging.ERROR and error in r.getMessage()
                                                for r in rig.records), [r.getMessage() for r in rig.records][-5:])
@@ -1797,36 +1797,88 @@ async def skate_robot() -> None:
     print("Skate: the robot's skate mode")
     rig = Rig()
     try:
-        check("with no skate policy installed, the robot has no skate controller",
-              rig.ts.skate is None and SKATE_CONTROLLER not in rig.ts.leg_controllers)
+        res = await rig.ts.switch_to(SKATE_CONTROLLER)
+        check("with no skate policy installed, the robot never activates the skate controller (it only ever"
+              " deactivates it)", rig.ts.skate is None and not res.ok and not rig.robot.activations(SKATE_CONTROLLER),
+              f"got {res}")
     finally:
         rig.close()
-    # Final review: a server restarted with no skate config (or a broken one) while gemini_skate still
-    # holds the legs. It must not walk or play a trick from there, and the gamepad e-stop relaxes it.
-    for what, error in [("no skate.yaml", None), ("a broken skate.yaml", "skate.yaml: missing coast_m")]:
-        rig = Rig(skate_error=error)
+    # Final review: a server restarted with skate mode off (no skate.yaml, a broken one, or a skate.yaml
+    # that selects another policy than the running controller's) while gemini_skate still holds the legs.
+    def off_with_skate_active(how: str) -> Rig:
+        cfg = fixture_skate()
+        if how == "no skate.yaml":
+            rig = Rig()
+        elif how == "a broken skate.yaml":
+            rig = Rig(skate_error="skate.yaml: missing coast_m")
+        else:  # the launch loaded another policy
+            rig = Rig(skate=cfg, param_file=_param_file(str(Path(tempfile.mkdtemp()) / "other_policy.json")))
+        rig.robot.controllers[LOCOMOTION_CONTROLLER] = "inactive"
+        rig.robot.controllers[SKATE_CONTROLLER] = "active"
+        rig.ts.worker.cancel()
+        rig.ts = Robot()  # a fresh server, the skate policy still holding the legs
+        return rig
+
+    server = _load_server()
+    for what in ("no skate.yaml", "a broken skate.yaml", "a skate.yaml that selects another policy"):
+        rig = off_with_skate_active(what)
         try:
-            rig.robot.controllers[LOCOMOTION_CONTROLLER] = "inactive"
-            rig.robot.controllers[SKATE_CONTROLLER] = "active"
-            rig.ts.worker.cancel()
-            rig.ts = Robot()  # a fresh server, the skate policy still holding the legs
             await rig.settle()
-            check(f"{what}, {SKATE_CONTROLLER} active at start: the server starts in skate mode, on the board",
-                  rig.ts.skate is None and rig.ts.state_now == SKATING, f"state_now {rig.ts.state_now}")
+            check(f"{what}, {SKATE_CONTROLLER} active at start: skate mode is off, and the server starts on the board",
+                  rig.ts.skate is None and rig.ts.state_now == SKATING, f"skate {rig.ts.skate}; state {rig.ts.state_now}")
             switches = len(rig.robot.switches)
             for tool, args in [("stand_up", {}), ("move", {"direction": "forward", "duration": 1.0}),
                                ("play_trick", {"name": "bow"}), ("lie_down", {})]:
                 res = await rig.call(tool, **args)
-                check(f"... {tool} is refused there and nothing switches", not res.ok
+                check(f"... {tool} is refused at once, and the reply says why (the skateboard)", not res.ok
+                      and "skateboard" in res.message and "queued" not in res.message
                       and len(rig.robot.switches) == switches and rig.robot.active() == {SKATE_CONTROLLER},
                       f"got {res}; active {sorted(rig.robot.active())}")
+            res = await rig.call("robot_status")
+            check("... robot_status says skate mode is off, with the short error, and not that the skate tools ride",
+                  "skate_forward and skate_turn ride it" not in res.message and "skate mode is off" in res.message
+                  and (rig.ts.skate_error or "no skate policy is installed") in res.message, res.message)
+            check("... (and says it is on the board, and how to get off)", "still holds the legs" in res.message
+                  and "end_skating" in res.message and "held=true" in res.message, res.message)
+            server.tools = rig.ts
+            out = await server.walking_deactivate()
+            await rig.settle()
+            check("... the app's Disconnect does not relax the legs, and says Pupper is still on the board",
+                  not out["success"] and "still balancing on the skateboard" in out["message"]
+                  and rig.robot.active() == {SKATE_CONTROLLER} and rig.ts.state_now == SKATING
+                  and len(rig.robot.switches) == switches, f"got {out}; active {sorted(rig.robot.active())}")
+            res = await rig.call("end_skating", held=False)
+            check("... end_skating(held=false) is refused and nothing changes", not res.ok and "hold" in res.message
+                  and rig.robot.active() == {SKATE_CONTROLLER} and rig.ts.state_now == SKATING
+                  and len(rig.robot.switches) == switches, f"got {res}")
+            mark = len(rig.records)
+            res = await rig.call("end_skating", held=True)
+            check(f"... end_skating(held=true) really relaxes: {SKATE_CONTROLLER} inactive, motors idle, guard cleared",
+                  res.ok and SKATE_CONTROLLER not in rig.robot.active() and rig.robot.deactivations(SKATE_CONTROLLER)
+                  and rig.ts.state_now == robot_api.MOTORS_IDLE and not rig.ts.fell_off_board,
+                  f"got {res}; active {sorted(rig.robot.active())}; state {rig.ts.state_now}")
+            check("... and its job reports the switch that did it, not 'already in that state'",
+                  any("end skating: ok" in m for m in rig.outcomes(mark))
+                  and not any("already in that state" in m for m in rig.outcomes(mark)), rig.outcomes(mark))
+            rig.imu(tilt_deg=3)  # lifted off onto the floor
+            res = await rig.call("stand_up")
+            check("... then stand_up works normally", res.ok and rig.ts.state_now == LOCOMOTION
+                  and rig.robot.active() & rig.ts.leg_controllers == {LOCOMOTION_CONTROLLER}, f"got {res}")
+            check("... and the server never tried to activate the skate controller",
+                  not rig.robot.activations(SKATE_CONTROLLER), f"switches {rig.robot.switches}")
+        finally:
+            rig.close()
+        rig = off_with_skate_active(what)
+        try:
+            await rig.settle()
             rig.robot.send("/emergency_stop", _DataMsg())
             await rig.settle()
-            check(f"... and the gamepad e-stop relaxes {SKATE_CONTROLLER}", SKATE_CONTROLLER not in rig.robot.active()
-                  and rig.robot.deactivations(SKATE_CONTROLLER) and rig.ts.fell_off_board,
-                  f"active {sorted(rig.robot.active())}; fell_off_board {rig.ts.fell_off_board}")
-            check("... and the server never tried to activate it", not rig.robot.activations(SKATE_CONTROLLER),
-                  f"switches {rig.robot.switches}")
+            check(f"{what}: the gamepad e-stop relaxes {SKATE_CONTROLLER}, and the board guard stays on",
+                  SKATE_CONTROLLER not in rig.robot.active() and rig.robot.deactivations(SKATE_CONTROLLER)
+                  and rig.ts.fell_off_board, f"active {sorted(rig.robot.active())}; fell_off_board {rig.ts.fell_off_board}")
+            res = await rig.ts.switch_to(SKATE_CONTROLLER)
+            check("... and switch_to can't activate the skate controller with skate mode off",
+                  not res.ok and not rig.robot.activations(SKATE_CONTROLLER), f"got {res}")
         finally:
             rig.close()
     rig = Rig(skate=fixture_skate())

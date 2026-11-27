@@ -79,7 +79,7 @@ from std_srvs.srv import Trigger
 
 from spawn_controllers import LOADED, PARAM_FILE, spawn
 from tricks import TRICK_FADE_S, TRICK_INIT_S, WALK_CONTROLLER, WALK_READY_S, Trick, load_tricks, reference_message_data
-from skateboard import FELL_ON_BOARD_MESSAGE, ON_BOARD_MESSAGE, SKATE_CONTROLLER, SKATING, STOPPED_ON_BOARD_MESSAGE, load_skate_safe, running_policy_error
+from skateboard import FELL_ON_BOARD_MESSAGE, ON_BOARD_MESSAGE, SKATE_CONTROLLER, SKATING, STOPPED_ON_BOARD_MESSAGE, load_skate_safe, not_installed_message, running_policy_error
 
 
 log = logging.getLogger("robot_api")
@@ -240,9 +240,11 @@ class Robot:
                 log.info("skate: %s", skate_detail)
         if self.skate_error:
             log.error("skate mode is off: %s", skate_detail or self.skate_error)
+        # gemini_skate is always one, even with skate mode off (no or a bad skate.yaml, or another policy
+        # loaded): every switch, stop and e-stop then deactivates it, and a fall in it counts. Only
+        # start_skating activates it, and switch_to refuses that without a skate config.
         self.leg_controllers = (LEG_CONTROLLERS | {t.controller for t in self.tricks.values() if t.kind == "policy"}
-                                | {t.walk_controller for t in self.tricks.values() if t.walks}
-                                | ({SKATE_CONTROLLER} if self.skate else set()))
+                                | {t.walk_controller for t in self.tricks.values() if t.walks} | {SKATE_CONTROLLER})
         self.param_clients: dict[str, object] = {}  # controller -> its set_parameters client
         self.following = False
         self.commands: asyncio.Queue = asyncio.Queue()
@@ -369,6 +371,8 @@ class Robot:
         keeping robot.state_now up to date. In skate mode it refuses every controller
         but the skate one; relaxing the motors is allowed.
         """
+        if controller == SKATE_CONTROLLER and self.skate is None:  # skate mode is off: never start the skate policy
+            return Result(False, f"can't switch to {controller}: {not_installed_message(self.skate_error)}")
         if (self.state_now == SKATING or self.fell_off_board) and controller not in (None, SKATE_CONTROLLER):
             # Half on a board, any other policy would start with two feet on a rolling
             # deck. The only way out is relaxing the motors, with a person holding Pupper.
@@ -520,10 +524,10 @@ class Robot:
         again, so the next motion stands up through its exit clip instead of
         jumping out of it."""
         states = await self.controller_states()
-        # gemini_skate too, even with no skate config: a server restarted with a missing or broken
-        # skate.yaml still finds Pupper on the board (SKATING), where switch_to refuses every other policy.
-        active = sorted((c for c in self.leg_controllers | {SKATE_CONTROLLER} if states.get(c) == "active"),
-                        key=lambda c: (c != SKATE_CONTROLLER, c))  # the skate one first: then the board guard holds
+        # gemini_skate first, even with skate mode off: a server restarted with no skate config still finds
+        # Pupper on the board (SKATING), where switch_to refuses every other policy.
+        active = sorted((c for c in self.leg_controllers if states.get(c) == "active"),
+                        key=lambda c: (c != SKATE_CONTROLLER, c))
         if active:
             self.state_now = self.state_of(active[0])
             if self.commands.empty():  # a request may already be queued: it set the state after it
@@ -696,8 +700,7 @@ class Robot:
         self.fell_off_board = on_board
         states = await self.controller_states()
         self.fell_off_board = on_board or states.get(SKATE_CONTROLLER) == "active"
-        # gemini_skate always, even when this server has no skate config (only ever deactivated here)
-        active = [c for c in sorted(self.leg_controllers | {SKATE_CONTROLLER}) if states.get(c) == "active"]
+        active = [c for c in sorted(self.leg_controllers) if states.get(c) == "active"]
         if active:
             req = SwitchController.Request()
             req.deactivate_controllers = active
@@ -758,6 +761,11 @@ class Robot:
             return Result(True, f"mode: fallen over (tilt e-stop in {self.fallen}). {how}")
         if self.fell_off_board and states.get(SKATE_CONTROLLER) != "active":
             return Result(True, f"mode: {STOPPED_ON_BOARD_MESSAGE}")
+        if states.get(SKATE_CONTROLLER) == "active" and self.skate is None:
+            why = self.skate_error or "no skate policy is installed"
+            return Result(True, f"mode: on the skateboard, but skate mode is off ({why}): the skate controller still"
+                                " holds the legs, so Pupper can't ride. Ask a person to hold the harness, then call"
+                                " end_skating with held=true")
         policy = f" (policy {self.skate.name})" if self.skate else ""
         mode = (
             f"skating{policy}: on the skateboard in skate mode (skate_forward and skate_turn ride it; end_skating"
