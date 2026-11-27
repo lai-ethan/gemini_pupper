@@ -77,9 +77,9 @@ from sensor_msgs.msg import CompressedImage, Imu
 from std_msgs.msg import Empty, Float32MultiArray, String
 from std_srvs.srv import Trigger
 
-from spawn_controllers import LOADED, spawn
+from spawn_controllers import LOADED, PARAM_FILE, spawn
 from tricks import TRICK_FADE_S, TRICK_INIT_S, WALK_CONTROLLER, WALK_READY_S, Trick, load_tricks, reference_message_data
-from skateboard import FELL_ON_BOARD_MESSAGE, ON_BOARD_MESSAGE, SKATE_CONTROLLER, SKATING, STOPPED_ON_BOARD_MESSAGE, load_skate_safe
+from skateboard import FELL_ON_BOARD_MESSAGE, ON_BOARD_MESSAGE, SKATE_CONTROLLER, SKATING, STOPPED_ON_BOARD_MESSAGE, load_skate_safe, running_policy_error
 
 
 log = logging.getLogger("robot_api")
@@ -232,6 +232,12 @@ class Robot:
         # None: no skate policy installed, or (skate_error) skate.yaml is wrong: skate mode is off, the rest runs
         # skate_error is what Gemini hears; skate_detail (the full path and exception) only goes to the log
         self.skate, self.skate_error, skate_detail = load_skate_safe()
+        if self.skate is not None:  # ... and it must be the policy the running gemini_skate was loaded with
+            mismatch, skate_detail = running_policy_error(self.skate, PARAM_FILE)
+            if mismatch:
+                self.skate, self.skate_error = None, mismatch
+            else:
+                log.info("skate: %s", skate_detail)
         if self.skate_error:
             log.error("skate mode is off: %s", skate_detail or self.skate_error)
         self.leg_controllers = (LEG_CONTROLLERS | {t.controller for t in self.tricks.values() if t.kind == "policy"}

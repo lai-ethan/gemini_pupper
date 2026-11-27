@@ -313,10 +313,11 @@ def fixture_tricks() -> dict[str, Trick]:
 class Rig:
     """A fresh Robot wired to a fresh fake robot, standing in locomotion mode."""
 
-    def __init__(self, tricks=None, skate=None, skate_error=None, skate_detail=None):
+    def __init__(self, tricks=None, skate=None, skate_error=None, skate_detail=None, param_file=None):
         """skate: the SkateConfig the robot loads (None: not installed); skate_error:
         instead, the message of a skate.yaml that failed to load (skate mode off), and
-        skate_detail the full detail load_skate_safe gives for the log."""
+        skate_detail the full detail load_skate_safe gives for the log. param_file: the
+        launch's controller parameter file the server reads (default: none there)."""
         global ROBOT
         self.clock = VirtualClock()
         ROBOT = self.robot = FakeRobot(self.clock)
@@ -325,6 +326,7 @@ class Rig:
         robot_api.asyncio = _AsyncioShim(self.clock)
         robot_api.load_tricks = made
         robot_api.load_skate_safe = lambda: (skate, skate_error, skate_detail)
+        robot_api.PARAM_FILE = param_file or Path(tempfile.mkdtemp(prefix="gemini_pupper_noparams_")) / "absent.yaml"
         names = (set(robot_api.LEG_CONTROLLERS) | {t.controller for t in made().values()}
                  | {t.walk_controller for t in made().values() if t.walks})
         if skate is not None:
@@ -1723,6 +1725,68 @@ async def skate_catalogue() -> None:
         rig.close()
 
 
+def _param_file(model_path: str | None) -> Path:
+    """A launch parameter file, as gemini_pupper.launch.py writes it: gemini_walk, and gemini_skate with
+    this model_path (None: no gemini_skate entry, as when the launch found no good skate.yaml)."""
+    params = {LOCOMOTION_CONTROLLER: {"ros__parameters": {"model_path": "/somewhere/walk.json"}}}
+    if model_path is not None:
+        params[SKATE_CONTROLLER] = {"ros__parameters": {"model_path": model_path, "game_buttons": False}}
+    f = Path(tempfile.mkdtemp(prefix="gemini_pupper_params_")) / "trick_controllers.yaml"
+    f.write_text(yaml.safe_dump(params))
+    return f
+
+
+async def skate_running_policy() -> None:
+    """The server's skate policy must be the one the running gemini_skate was loaded with."""
+    print("Skate: the server checks that the running skate controller loaded the selected policy")
+    cfg = fixture_skate()
+    other = str(Path(tempfile.mkdtemp(prefix="gemini_pupper_other_")) / "policies" / "split_steer_v13_max0.3_policy.json")
+    garbled = Path(tempfile.mkdtemp(prefix="gemini_pupper_params_")) / "trick_controllers.yaml"
+    garbled.write_text("gemini_skate: [unclosed\n")
+    folder = Path(tempfile.mkdtemp(prefix="gemini_pupper_params_"))  # a folder where the file should be
+    server = _load_server()
+    for what, param_file, on in [
+        ("the launch loaded this policy", _param_file(str(cfg.policy_path)), True),
+        ("the launch loaded another policy (skate.yaml changed since start.sh)", _param_file(other), False),
+        ("the launch loaded no skate policy", _param_file(None), False),
+        ("there is no parameter file (not started by this repo's launch, or a desk test)", None, True),
+        ("the parameter file is not valid YAML", garbled, False),
+        ("the parameter file cannot be read (a folder)", folder, False),
+    ]:
+        rig = Rig(skate=cfg, param_file=param_file)
+        try:
+            ts = rig.ts
+            if on:
+                check(f"{what}: skate mode stays on", ts.skate is cfg and ts.skate_error is None,
+                      f"skate {ts.skate}; error {ts.skate_error!r}")
+                continue
+            error = ts.skate_error or ""
+            check(f"{what}: skate mode is off, with an error", ts.skate is None and bool(error),
+                  f"skate {ts.skate}; error {error!r}")
+            check("... the error says to stop the robot software and start it again, plainly (no path, no"
+                  " exception text, under 160 characters)", "stop" in error and "start it again" in error
+                  and "/" not in error and "Error" not in error and len(error) < 160, f"error {error!r}")
+            check("... the log gets the detail", any(r.levelno >= logging.ERROR and str(robot_api.PARAM_FILE)
+                                                     in r.getMessage() for r in rig.records),
+                  [r.getMessage() for r in rig.records][-3:])
+            status = await server.skate_status(ts)
+            check("... /system/status shows installed: false and the error", status["installed"] is False
+                  and status["policy"] is None and status["error"] == error, f"got {status}")
+            await rig.call("lie_down")
+            res = await rig.call("start_skating", placed=True)
+            check("... start_skating is refused with it, and nothing switches to the skate controller",
+                  not res.ok and res.message == skateboard.not_installed_message(error)
+                  and not rig.robot.activations(SKATE_CONTROLLER), f"got {res}")
+        finally:
+            rig.close()
+    rig = Rig(skate=cfg, param_file=_param_file(other))
+    try:
+        detail = " ".join(r.getMessage() for r in rig.records)
+        check("a mismatch logs both policy files", other in detail and str(cfg.policy_path) in detail, detail)
+    finally:
+        rig.close()
+
+
 def fixture_skate() -> SkateConfig:
     return SkateConfig(name="steer_v6", tested="robot 2026-11-26: a test entry", policy_path=Path("skate.json"),
                        speed=0.3, carve={"gentle": 0.15, "medium": 0.3, "hard": 0.5}, travel_m_per_s=0.3, turn_deg_per_s={"gentle": 0.7, "medium": 1.0, "hard": 1.9}, coast_m=0.3,
@@ -2676,7 +2740,7 @@ GROUPS = {
     "todo7": todo7, "todo8": todo8, "todo9": todo9, "todo10": todo10, "todo11": todo11, "robot": provided,
     "optional_jump": optional_jump, "skate_config": skate_config, "skate_robot": skate_robot,
     "skate_tools": skate_tools, "skate_guards": skate_guards, "skate_catalogue": skate_catalogue,
-    "skate_demo": skate_demo,
+    "skate_demo": skate_demo, "skate_running_policy": skate_running_policy,
 }
 OPT_IN = {"optional_jump"}  # run only when asked for by name
 PARTS = {
@@ -2686,7 +2750,8 @@ PARTS = {
     "part4": ["todo7", "todo8"],
     "part5": ["todo9", "todo10"],
     "part7": ["todo11"],
-    "skate": ["skate_config", "skate_catalogue", "skate_robot", "skate_tools", "skate_guards", "skate_demo"],
+    "skate": ["skate_config", "skate_catalogue", "skate_running_policy", "skate_robot", "skate_tools", "skate_guards",
+              "skate_demo"],
 }
 
 

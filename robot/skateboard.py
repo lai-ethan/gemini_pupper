@@ -35,7 +35,9 @@ estimates at the top level) is one too.
 No skate.yaml means no skate mode: load_skate returns None and the skate
 tools say nothing is installed. The robot and the launch file use
 load_skate_safe: a bad skate.yaml turns skate mode off (the tools say why)
-instead of stopping the robot from starting.
+instead of stopping the robot from starting. The robot server also checks
+running_policy_error: skate mode is off when the running gemini_skate was
+loaded with another policy file than the one skate.yaml selects now.
 
 This module has no ROS imports, so the launch file can use it too.
 """
@@ -309,6 +311,36 @@ def load_skate_safe(skate_dir: Path = SKATE_DIR) -> tuple[SkateConfig | None, st
         return None, str(e), e.detail
     except Exception as e:  # a bug in the checks above must not stop the robot either
         return None, "skate.yaml could not be loaded", f"{skate_dir / 'skate.yaml'}: {type(e).__name__}: {e!r}"
+
+
+# What Gemini hears (inside not_installed_message) when running_policy_error turns skate mode off.
+RESTART_NEEDED = "skate.yaml: changed since the robot started; stop the robot software and start it again"
+UNCHECKED = "skate.yaml: can't tell which skate policy is loaded; stop the robot software and start it again"
+
+
+def running_policy_error(cfg: SkateConfig, param_file: Path) -> tuple[str | None, str]:
+    """Is the running gemini_skate the policy cfg selects? The launch file writes param_file
+    (spawn_controllers.PARAM_FILE) once per launch, before the spawner loads gemini_skate from
+    it, and start.sh only launches when the stack is down: so after a skate.yaml edit with the
+    stack left up, the file still has the policy the controller was loaded with. Returns
+    (error, detail): error None when it matches, or when there is no file (a stack not started
+    by this repo's launch, or a desk test: then gemini_skate was not loaded from it either);
+    otherwise the short error Gemini may read, and the detail for the log."""
+    try:
+        params = yaml.safe_load(param_file.read_text())
+    except FileNotFoundError:
+        return None, f"{param_file} is not there, so the skate policy the controller loaded was not checked"
+    except (OSError, UnicodeDecodeError, yaml.YAMLError, RecursionError) as e:
+        return UNCHECKED, f"{param_file}: could not read it ({type(e).__name__}: {e})"
+    entry = params.get(SKATE_CONTROLLER) if isinstance(params, dict) else None
+    loaded = entry.get("ros__parameters", {}) if isinstance(entry, dict) else None
+    loaded = loaded.get("model_path") if isinstance(loaded, dict) else None
+    if not isinstance(loaded, str):
+        return RESTART_NEEDED, f"{param_file} has no {SKATE_CONTROLLER} model_path: the launch loaded no skate policy"
+    if os.path.realpath(loaded) != os.path.realpath(cfg.policy_path):
+        return RESTART_NEEDED, (f"{param_file}: {SKATE_CONTROLLER} was loaded with {loaded}, but skate.yaml now"
+                                f" selects {cfg.name} ({cfg.policy_path})")
+    return None, f"{SKATE_CONTROLLER} was loaded with {cfg.name} ({cfg.policy_path}), the policy skate.yaml selects"
 
 
 def skate_controller_params(cfg: SkateConfig, base: dict) -> dict:
