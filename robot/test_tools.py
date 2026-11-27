@@ -23,6 +23,7 @@ Pupper, the e-stop and a TA are for.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import math
@@ -2159,6 +2160,126 @@ async def skate_guards() -> None:
         check("... and so does skate_forward's refusal", not res.ok and "end_skating" in res.message
               and "held" in res.message, f"got {res}")
         await rig.call("end_skating", held=True)
+    finally:
+        rig.close()
+
+    rig = Rig(skate=fixture_skate())
+    try:
+        # The debug panel's STOP button sends /move/velocity with everything 0, and the app's
+        # disconnect sends /walking/deactivate. On the board both stop the ride (like the stop
+        # tool), and the skate policy keeps balancing: they never relax the motors there.
+        server = _load_server()
+        server.tools = rig.ts
+
+        def zero_move():
+            return server.MoveVelocity(forward_backward_velocity=0.0, right_left_velocity=0.0,
+                                       turning_velocity=0.0, duration=0.0)
+
+        replies = {}
+        for what, endpoint, args in [("the debug panel's STOP (/move/velocity, all 0)", server.move_velocity, [zero_move()]),
+                                     ("the app's disconnect (/walking/deactivate)", server.walking_deactivate, [])]:
+            await _on_board(rig)
+            before = len(rig.robot.twists())
+            await tools.call(rig.ts, "skate_forward", {"seconds": 5})
+            for _ in range(40):
+                await _real_sleep(0)
+            riding = bool(_ride_twists(rig, before))
+            switches, mark = len(rig.robot.switches), len(rig.robot.twists())
+            out = await endpoint(*args)
+            await rig.settle()
+            replies[what] = out
+            last = rig.robot.twists()[-1][1]
+            ride = _ride_twists(rig, before)
+            check(f"on the board, {what} cuts the ride short: the queue is empty and a zero command was sent",
+                  riding and 0 < len(ride) < 90 and rig.ts.commands.empty() and rig.ts.current is None
+                  and len(rig.robot.twists()) > mark and last.linear.x == 0 and last.angular.z == 0,
+                  f"got {out}; {len(ride)} ride commands of 100")
+            check("... and the skate policy still holds the legs (motors not relaxed)",
+                  SKATE_CONTROLLER in rig.robot.active() and rig.ts.state_now == SKATING
+                  and len(rig.robot.switches) == switches, f"state {rig.ts.state_now}; active {rig.robot.active()}")
+            await rig.call("end_skating", held=True)
+        await _on_board(rig)
+        out = replies["the debug panel's STOP (/move/velocity, all 0)"]
+        check("... the STOP reply is ok and says it stopped", out["success"] and "stopped" in out["message"], f"got {out}")
+        out = replies["the app's disconnect (/walking/deactivate)"]
+        check("... the disconnect reply says Pupper is still balancing on the board, and end_skating with a person"
+              " holding it is the way off", "balancing" in out["message"] and "board" in out["message"]
+              and "end_skating" in out["message"] and "hold" in out["message"], f"got {out}")
+        for vx, vy, wz, dur in [(0.0, 0.0, 0.0, 1.0), (0.0, 0.0, 10.0, 0.0), (0.0, 0.1, 0.0, 0.0)]:
+            switches, mark = len(rig.robot.switches), len(rig.robot.twists())
+            out = await server.move_velocity(server.MoveVelocity(forward_backward_velocity=vx, right_left_velocity=vy,
+                                                                 turning_velocity=wz, duration=dur))
+            await rig.settle()
+            check(f"on the board, /move/velocity ({vx}, {vy}, {wz}, {dur} s) is still refused, and says why",
+                  not out["success"] and "skateboard" in out["message"] and len(rig.robot.switches) == switches
+                  and not walk_twists_since(rig, mark) and rig.ts.state_now == SKATING, f"got {out}")
+        await rig.call("end_skating", held=True)
+    finally:
+        rig.close()
+
+    # Off the board, STOP and disconnect do what they did before: the same replies as on a
+    # robot with no skate policy installed.
+    server = _load_server()
+
+    async def off_board(skate, endpoint: str, args: list):
+        rig = Rig(skate=skate)
+        try:
+            server.tools = rig.ts
+            out = await getattr(server, endpoint)(*args)
+            await rig.settle()
+            return out, rig.ts.state_now
+        finally:
+            rig.close()
+
+    zero = server.MoveVelocity(forward_backward_velocity=0.0, right_left_velocity=0.0, turning_velocity=0.0, duration=0.0)
+    for what, endpoint, args in [("the STOP /move/velocity (all 0)", "move_velocity", [zero]),
+                                 ("/walking/deactivate", "walking_deactivate", [])]:
+        plain = await off_board(None, endpoint, args)
+        skate = await off_board(fixture_skate(), endpoint, args)
+        check(f"off the board, {what} behaves as on a robot without skate", plain == skate, f"{plain} vs {skate}")
+
+    # GET /system/status reports skate mode (the battery and network parts are stood in for).
+    host = {"battery": {"percentage": 80.0, "is_charging": False, "voltage": 8.1},
+            "cpu": {"usage": 5.0, "temperature": 50.0}, "services": {"robot": "active", "internet": "offline"}}
+
+    async def status(rig: Rig) -> dict | None:
+        if not hasattr(server, "host_status"):
+            return None
+        server.tools = rig.ts
+        server.host_status = lambda: dict(host)
+        out = server.system_status()
+        return await out if inspect.isawaitable(out) else out
+
+    rig = Rig(skate=fixture_skate())
+    try:
+        out = await status(rig)
+        check("/system/status keeps its battery, cpu and services keys, and adds skate",
+              out is not None and set(out) == {*host, "skate"} and all(out[k] == v for k, v in host.items()), f"got {out}")
+        want = {"installed": True, "policy": "steer_v6", "tested": "robot 2026-11-26: a test entry", "error": None}
+        check("... with a skate policy installed: installed, its name and test note, no error, controller inactive",
+              out is not None and out.get("skate") == {**want, "controller": "inactive"}, f"got {out and out.get('skate')}")
+        await _on_board(rig)
+        out = await status(rig)
+        check("... and after start_skating the controller is active",
+              out is not None and out.get("skate") == {**want, "controller": "active"}, f"got {out and out.get('skate')}")
+        await rig.call("end_skating", held=True)
+    finally:
+        rig.close()
+    rig = Rig(skate_error="skate.yaml: speed must be a number")
+    try:
+        out = await status(rig)
+        sk = out and out.get("skate")
+        check("... with a broken skate config: not installed, and the error says why",
+              bool(sk) and sk["installed"] is False and sk["policy"] is None
+              and sk["error"] == "skate.yaml: speed must be a number", f"got {sk}")
+    finally:
+        rig.close()
+    rig = Rig()
+    try:
+        out = await status(rig)
+        sk = out and out.get("skate")
+        check("... with no skate config: not installed, no error, controller missing",
+              sk == {"installed": False, "policy": None, "tested": None, "error": None, "controller": "missing"}, f"got {sk}")
     finally:
         rig.close()
 
