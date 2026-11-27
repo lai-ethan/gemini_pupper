@@ -2118,6 +2118,11 @@ async def skate_tools() -> None:
     sentence = next((s for s in re.split(r"(?<=\.) ", flat) if "wandered" in s), "")
     check('... and before anyone straightens the board, it says "call stop first"', "call stop first" in sentence,
           sentence)
+    get_off = "to get off, call stop first, then ask a person to hold you, then call end_skating."
+    check("... the get-off sentence is exact: stop first, then a person holds Pupper, then end_skating",
+          get_off in flat, flat, passes=get_off)
+    check('... and it says "stop first" for getting off only once', flat.count("to get off") == 1
+          and "get off right away" not in flat, flat)
     queued = re.search(r"at most (\d+(?:\.\d+)?) s of riding", text)
     limit = yaml.safe_load((skateboard.SKATE_DIR / "skate.yaml").read_text())["queue_max_seconds"]
     check("... and its queue limit is skate.yaml's queue_max_seconds", bool(queued) and float(queued[1]) == float(limit),
@@ -2658,6 +2663,27 @@ async def _demo(cfg: SkateConfig) -> None:
         check(f"{p} 5. ... and the skate controller still holds the legs", rig.ts.state_now == SKATING
               and rig.robot.active() & rig.ts.leg_controllers == {SKATE_CONTROLLER}, f"active {rig.robot.active()}")
 
+        # 5b. "Get off the board", the normal way: stop first, then a person holds Pupper, then end_skating.
+        await _ride_mid(rig, "skate_forward", {"seconds": 5})
+        res = await rig.call("stop")
+        check(f"{p} 5b. get off: stop first ends the ride, still in skate mode", res.ok and rig.ts.state_now == SKATING
+              and rig.ts.commands.empty(), f"got {res}; state {rig.ts.state_now}")
+        switches = len(rig.robot.switches)
+        res = await rig.call("end_skating", held=False)
+        check(f"{p} 5b. ... end_skating(held=false) is refused", not res.ok and "hold" in res.message
+              and len(rig.robot.switches) == switches, f"got {res}")
+        res = await rig.call("end_skating", held=True)
+        check(f"{p} 5b. ... end_skating(held=true) relaxes the motors: motors idle, the board guard cleared",
+              res.ok and rig.ts.state_now == robot_api.MOTORS_IDLE and rig.ts.state_after_queue == robot_api.MOTORS_IDLE
+              and not rig.ts.fell_off_board and not rig.robot.active() & rig.ts.leg_controllers,
+              f"got {res}; state {rig.ts.state_now}; fell_off_board {rig.ts.fell_off_board}")
+        rig.imu(tilt_deg=3)  # lifted off onto the floor
+        res = await rig.call("stand_up")
+        check(f"{p} 5b. ... lifted off, stand_up works", res.ok and rig.ts.state_now == LOCOMOTION, f"got {res}")
+        await rig.call("lie_down")
+        res = await rig.call("start_skating", placed=True)
+        check(f"{p} 5b. ... and placed again, start_skating works", res.ok and rig.ts.state_now == SKATING, f"got {res}")
+
         # 6. The gamepad e-stop while riding, then back on.
         await _ride_mid(rig, "skate_forward", {"seconds": 5})
         stopped, tail = await _gamepad_estop(rig)
@@ -2705,7 +2731,7 @@ async def _demo(cfg: SkateConfig) -> None:
               f"vx from {min(m.linear.x for m in sent):g} to {max(m.linear.x for m in sent):g};"
               f" max |wz| {max(abs(m.angular.z) for m in sent):g}")
         check(f"{p} 8. ... no ride lasted over {skateboard.MAX_COMMAND_S:g} s, and each ended with a zero command",
-              len(rides) == 6 and all(end - start <= skateboard.MAX_COMMAND_S + 1e-6 for start, end in rides),
+              len(rides) == 7 and all(end - start <= skateboard.MAX_COMMAND_S + 1e-6 for start, end in rides),
               f"rides (s): {[round(end - start, 2) for start, end in rides]}")
     except Exception as e:  # noqa: BLE001
         check(f"{p} the demo ran to the end", False, f"raised {type(e).__name__}: {e}")

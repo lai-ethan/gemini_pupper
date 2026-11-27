@@ -13,8 +13,11 @@ Tools: `lab/part8_skate.py`. Numbers: `skate.yaml`. Config loader:
   is loaded, and no tool lets Gemini change it.
 - `policies/` holds copies of pupper-mjlab's `skateboard/policies/` files
   (steer v6, steer v10 and steer v13, the three catalogue entries; v13 has only
-  been run in simulation, never on the robot). To change policy, set
-  `policy:` to another name and restart the robot stack. To add one, copy the
+  been run in simulation, never on the robot). To change policy, get Pupper
+  off the board, set `policy:` to another name, then run `robot/stop.sh` and
+  `robot/start.sh` (`start.sh` alone, with the stack still up, restarts only
+  the server and leaves the old policy in the skate controller; see
+  `DEMO.md`, "Changing policy"). To add one, copy the
   file into `policies/`, add an entry and measure its estimates with
   pupper-mjlab's `skateboard/tools/timed_ride.py`. A new policy needs a TA's
   OK before its first run on the robot.
@@ -23,6 +26,15 @@ Tools: `lab/part8_skate.py`. Numbers: `skate.yaml`. Config loader:
   three into an entry under `policies:`.
 - A bad `skate.yaml` does not stop the robot: skate mode is off, the error is
   logged, and the skate tools tell Gemini the config has an error.
+- The robot server also compares the policy file `skate.yaml` selects with
+  the `model_path` the launch wrote for `gemini_skate` in its controller
+  parameter file (`PARAM_FILE` in `robot/spawn_controllers.py`), which the
+  spawner loaded the controller from. If they differ, or the file has no
+  skate entry or cannot be read, skate mode is off and Gemini hears that the
+  robot software must be stopped and started again. No file at all (a stack
+  not started by this repo's launch, or a desk test) leaves skate mode on:
+  then the controller was not loaded from that file either. A policy file
+  replaced under the same name is not noticed.
 - What a person says: "lie down", place Pupper, "start skating", "go
   forward", "turn left", "stop", hold Pupper, "get off the board".
 - Pupper cannot measure distance or see obstacles. Commands are timed
@@ -44,20 +56,33 @@ Tools: `lab/part8_skate.py`. Numbers: `skate.yaml`. Config loader:
 - The board guard covers the web app's debug panel too: its walk, trick,
   stand and lie-down buttons are refused on the board, like the tools. On the
   board, the panel's STOP button (a `/move/velocity` of all zeros) and the
-  app's disconnect (`/walking/deactivate`) stop the ride the way the stop
-  tool does: a zero command goes out and the skate policy keeps balancing.
-  Neither relaxes the motors there; only `end_skating`, with Pupper held,
-  does. Off the board they do what they always did. The gamepad is outside
-  every server guard: on the board, use only its e-stop.
+  app's Disconnect button (`/walking/deactivate`) stop the ride the way the
+  stop tool does: a zero command goes out and the skate policy keeps
+  balancing. Neither relaxes the motors there; only `end_skating`, with
+  Pupper held, does. Off the board they do what they always did. The gamepad
+  is outside every server guard: on the board, use only its e-stop.
+- Only the Disconnect button tells the robot the app is going. A closed or
+  reloaded page, a dropped SSH tunnel or Wi-Fi, or a Gemini session that
+  closes by itself sends nothing: the rides already queued run to their end
+  (at most `queue_max_seconds`, 10 s), no voice stop can reach Pupper, and
+  the gamepad e-stop is the stop.
+- A known narrow window: a Disconnect that lands in the instant the switch
+  into skate mode completes can relax Pupper on the board without the "is
+  someone holding it?" check. The legs only relax, they never walk, and the
+  person placing Pupper has a hand on the harness at that moment.
 - `GET /system/status` has a `skate` block: `installed`, `policy`, `tested`,
-  `error` (a bad `skate.yaml`'s message) and `controller` ("active",
+  `error` (a bad `skate.yaml`'s message, or the stop-and-start-again error above) and `controller` ("active",
   "inactive", "missing" or "unknown").
 - "stop" during `start_skating`'s controller switch can still leave the skate
   policy holding the legs; Pupper then counts as on the board, in skate mode.
   A `start_skating` whose switch fails leaves Pupper in motors idle.
 - Desk test: `python3 lab/test.py skate` (no robot needed). Its
-  `skate_demo` group scripts the whole demo in `DEMO.md`, once for every
-  policy in the catalogue.
+  `skate_demo` group scripts the demo's tool calls in `DEMO.md`, once for
+  every policy in the catalogue: start, walking refused, rides and carves,
+  stop, getting off (stop, then `end_skating` with Pupper held), the gamepad
+  e-stop, and a tilt fall. The debug panel's STOP and the Disconnect button
+  are in other `skate` groups; what Gemini says, an app lost without the
+  Disconnect button, and the real robot are not covered.
 - A new policy needs a TA's OK before its first run on the robot. The
   hardware checklist is test 6 in pupper-mjlab's
   `skateboard/HARDWARE_TEST.md`.

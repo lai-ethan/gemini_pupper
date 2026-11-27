@@ -72,13 +72,13 @@ or a sharp corner. A turn on the board is a wide, slow curve. On a long ride
 you also drift a little to one side, so keep rides short. If the board has
 wandered, call stop first, then ask a person to hold you and straighten the
 board. If anyone says stop, call stop first; the board rolls on a little
-because it has no brake. To get off, ask a person to hold you, then call
-end_skating.
+because it has no brake. To get off, call stop first, then ask a person to hold
+you, then call end_skating.
 
-end_skating waits until the rides already queued are done, so to get off right
-away, call stop first. At most 10 s of riding can be queued, sometimes a little
-less; if a tool says a ride was not queued, wait until the rides already queued
-have finished, then ask again. If you tip over on the board, you cannot walk,
+end_skating waits until the rides already queued are done.
+At most 10 s of riding can be queued, sometimes a little less; if a tool says a
+ride was not queued, wait until the rides already queued have finished, then
+ask again. If you tip over on the board, you cannot walk,
 follow or do tricks: ask a person to hold you, call end_skating with held true,
 ask them to lift you off the board, and only then call stand_up.
 

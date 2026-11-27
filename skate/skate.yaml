@@ -1,6 +1,7 @@
 # Skate mode for Gemini Pupper. Read by robot/skateboard.py; see its docstring.
 # To change policy: set `policy` to another name below, then restart the
-# robot stack (robot/stop.sh, robot/start.sh). A new policy needs a TA's OK.
+# robot stack with Pupper off the board (robot/stop.sh, then robot/start.sh;
+# start.sh alone does not reload the policy). A new policy needs a TA's OK.
 policy: steer_v6
 speed: 0.3            # m/s: the only speed checked in sim; the policies clip here
 carve:                # yaw command, rad/s (0 rides straight)

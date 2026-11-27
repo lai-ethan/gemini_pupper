@@ -9,11 +9,13 @@ Read this first:
   below that says what Pupper will do comes from the code and the desk tests.
   `python3 lab/test.py skate_demo` runs the demo's tool calls on a fake
   robot, for every policy in `skate.yaml`: start (refused until placed),
-  walking refused, a forward ride, gentle and hard carves, "stop", the
-  gamepad e-stop, a tilt fall and getting off. It does not cover what Gemini
-  says or asks, the debug panel's STOP, the app disconnecting (other desk
-  tests in the `skate` group cover those two), or anything on the real
-  robot.
+  walking refused, a forward ride, gentle and hard carves, "stop", getting
+  off the normal way (stop, then `end_skating` with Pupper held), the
+  gamepad e-stop, a tilt fall and getting off after it. It does not cover
+  what Gemini says or asks, the debug panel's STOP, the app's Disconnect
+  button (other desk tests in the `skate` group cover those two), the app
+  lost any other way (nothing covers that: see "If something goes wrong"),
+  or anything on the real robot.
 - **Every distance and turn is a sim estimate**, from pupper-mjlab's
   `skateboard/tools/timed_ride.py` (16 boards, 5 s rides). None has been
   measured on the robot.
@@ -21,7 +23,8 @@ Read this first:
   (not through Gemini Pupper), steer v6 and steer v10 each rolled the board
   forward on carpet for a whole clip. Nothing was measured.
 - The board drifts sideways over long rides in sim (tens of cm in 25 s).
-  The 2026-11-26 clips showed it drift too; not measured. Keep rides short.
+  In the 2026-11-26 gamepad clips the board went forward and a bit to one
+  side; nothing was measured. Keep rides short.
 - The gamepad e-stop (right-stick press) outranks everything. One person
   holds it, one keeps a hand on the harness, the whole time.
 
@@ -38,7 +41,10 @@ Read this first:
       gave it, when, and for which file.
 - [ ] **`policy:` in `skate.yaml`** names the policy for the demo
       (`steer_v6` now). See "Changing policy". Steer v6 is the one to run
-      first; steer v10 is provisional; steer v13 has only run in simulation.
+      first; steer v10 is provisional; steer v13 has only run in simulation
+      and has never run on the robot. Before steer v13 is selected for
+      voice, it must pass the gamepad ride test (test 5 of pupper-mjlab's
+      `skateboard/HARDWARE_TEST.md`) with a TA's OK.
 - [ ] **`python3 lab/test.py skate` passes**, on the robot's copy of the
       repo, after the last `git pull`.
 - [ ] pupper-mjlab's `skateboard/HARDWARE_TEST.md` says voice control (its
@@ -51,8 +57,9 @@ Read this first:
       that end first. The sheet says no doc tells that end on the real board
       beyond that name, so check which end has the castle picture before you
       place Pupper.
-- [ ] The surface. Carpet is the only surface either policy has rolled the
-      board on. Test 6 of the sheet asks for 4 m of clear floor ahead.
+- [ ] The surface. Carpet is the only surface steer v6 and steer v10 have
+      rolled the board on; steer v13 has never run on the robot. Test 6 of
+      the sheet asks for 4 m of clear floor ahead.
 - [ ] The Gemini key is set up on the robot (`robot/setup.sh` saves it; see
       the README). Never in this repo.
 - [ ] A gamepad connected to Pupper, for its e-stop.
@@ -66,6 +73,17 @@ Read this first:
    screen). From a laptop, open the SSH tunnel the README gives, open
    http://localhost:8000, open **Settings**, paste the key and press
    **WAKE PUPPER**.
+
+   `start.sh` alone does not reload the skate policy. When the robot stack
+   is already running, it restarts only the robot server: the skate
+   controller keeps the policy it was started with, even after a
+   `skate.yaml` edit or a `git pull`. So always run `robot/stop.sh` first
+   (Pupper off the board and lying on the floor; `stop.sh` relaxes the
+   legs), then `robot/start.sh`. The server also checks: if the skate
+   controller was started with another policy file than the one
+   `skate.yaml` selects, skate mode is off and the `skate` block's `error`
+   says to stop the robot software and start it again. It cannot see a
+   policy file replaced under the same name, so stop first anyway.
 3. Open http://localhost:8000/system/status in a browser tab (a read-only
    GET). Its `skate` block should read, for steer v6:
 
@@ -77,7 +95,9 @@ Read this first:
    - `installed: true` and the `policy` you chose in `skate.yaml`.
    - `controller: "inactive"`: the skate controller is loaded and not holding
      the legs. It must not be `"active"` before "start skating" (sheet,
-     test 6); if it is, press the e-stop and run `robot/stop.sh`.
+     test 6); if it is, press the e-stop, have a person hold Pupper (the
+     legs go limp; if it is on the board, lift it off), and run
+     `robot/stop.sh`.
    - `"missing"`: there is no skate config, or the controller manager does not
      list `gemini_skate`. Check the spawner's lines in
      `/tmp/gemini-pupper/robot.log`.
@@ -85,8 +105,12 @@ Read this first:
      asking it failed. Wait and reload the tab.
    - `error` set (and `installed: false`): `skate.yaml` has a mistake, and
      skate mode is off (the rest of the robot still works). Read the error:
-     it names the key. Fix `skate.yaml`, then `robot/stop.sh` and
-     `robot/start.sh`, and check this block again.
+     it names the key. Fix `skate.yaml`, then, with Pupper lying on the
+     floor off the board, `robot/stop.sh` and `robot/start.sh`, and check
+     this block again. An error that says `skate.yaml` changed since the
+     robot started, or that the server can't tell which skate policy is
+     loaded, means the skate controller may hold another policy: run
+     `robot/stop.sh` and `robot/start.sh` the same way.
 
 ## Placement
 
@@ -127,7 +151,7 @@ body's along the deck, and Pupper square to the board. Tape marks on the
 deck centre line, about 7.5 cm ahead of and behind the board's middle, give
 the two left-foot spots.
 
-Wrong (as in the 2026-11-24 videos): the body on top of the deck, the left
+Wrong: the body on top of the deck, the left
 legs past the far edge of the deck, the body resting on the deck. Each gives
 the policy a stance it never trained on.
 
@@ -158,19 +182,23 @@ These are `travel_m_per_s × 3`, `turn_deg_per_s.gentle × 3` and `coast_m` from
    reply ends with "Estimate from simulation, not measured: about 0.9 m
    forward, then the board rolls on about 0.1 m. Pupper cannot see
    obstacles: a person must keep the path clear." (steer v6; for steer v10
-   the roll is 0.2 m). Gemini should say "about".
+   and steer v13 the roll is 0.2 m: see the table above). Gemini should say
+   "about".
 5. **"Turn left gently."** A gentle carve: Pupper rides forward at 0.3 m/s
    and leans left (a yaw command of 0.15 rad/s). If Gemini leaves the time
    out it is 3 s, and the reply says "about 0.9 m forward, curving left by
-   about 3 degrees" (steer v6) or "... about 2 degrees" (steer v10). It is a wide, slow curve, not
-   a corner: expect the heading to move only a few degrees. If the board
+   about 3 degrees" (steer v6 and steer v13) or "... about 2 degrees"
+   (steer v10). It is a wide, slow curve, not a corner: expect the heading to move only a few degrees. If the board
    rides dead straight, write it down; do not raise the carve.
 6. **"Stop."** Gemini calls `stop` first. Pushing stops; the board has no
    brake and rolls on a little. Pupper stays in skate mode, balancing.
-7. **"Get off the board."** Gemini should ask whether someone is holding
+7. **"Get off the board."** If a ride is still going, say "stop" first.
+   Gemini should call `stop` first, then ask whether someone is holding
    Pupper, and only call `end_skating` once you say so. Then the motors
    relax: hold Pupper, lift it off the board onto the floor. On the floor,
-   "stand up" gets it walking again.
+   "stand up" gets it walking again. (The desk demo script runs this step
+   too: stop, `end_skating` refused without held, then with held the
+   motors relax and the board guard is cleared.)
 
 What Gemini refuses on the board, and says why: walking, going backward,
 stepping sideways, turning on the spot, following, tricks, standing up and
@@ -187,9 +215,11 @@ lying down. "Walk forward" on the board is a good thing to show.
   the motors. The panel's other buttons (walk, trick, stand, lie down) are
   refused on the board.
 - **The gamepad e-stop** (right-stick press). The motors relax at once,
-  whatever Gemini is doing. After it is pressed, a ride command or two may
-  still go out for up to about a tenth of a second before the motors relax
-  (measured on the desk test's clock, not on the robot). Pupper is still on the board, so the board guard
+  whatever Gemini is doing. After it is pressed, a few ride commands may
+  still go out before the motors relax: the desk test allows at most 4
+  commands within 0.2 s, and measured 2 commands, the last 0.05 s after
+  the press (on the desk test's fake clock, not on the robot). Pupper is
+  still on the board, so the board guard
   stays on: "stand up" is refused, and `robot_status` says the motors are
   relaxed on the board. To go on: place Pupper again if it moved, and say
   "start skating" (Gemini asks whether it is placed). To get off instead:
@@ -200,15 +230,26 @@ lying down. "Walk forward" on the board is a good thing to show.
   the board": the motors relax. Lift Pupper off the board onto the floor,
   upright, then say "stand up". (Placing it again and saying "start skating"
   is also allowed.)
-- **The app disconnects** (or the page is closed). The ride stops, and the
-  skate policy keeps balancing: the motors are not relaxed, unlike a
-  disconnect off the board, which lies Pupper down. Keep a hand on the
-  harness. Reconnect (**WAKE PUPPER**), then go on, or say "get off the
-  board". If the app will not come back, the e-stop relaxes the motors.
-  The board guard then stays on until `end_skating`, which needs the app.
-  The only other way out is `robot/stop.sh`, then `robot/start.sh`, with a
-  person holding Pupper and the student's OK (see "Before the day"); lift
-  Pupper off the board before starting again.
+- **The app's Disconnect button.** Only this button tells the robot the
+  app is going: the ride stops, and the skate policy keeps balancing. The
+  motors are not relaxed, unlike a disconnect off the board, which lies
+  Pupper down. Keep a hand on the harness.
+- **The app is lost any other way** (the page closed or reloaded, the SSH
+  tunnel or the Wi-Fi dropped, or the Gemini session closed by itself).
+  The robot is not told. The ride runs on the robot, so rides already
+  queued run to their end: at most 10 s of riding (`queue_max_seconds` in
+  `skate.yaml`). No voice "stop" reaches Pupper then: the gamepad e-stop
+  is the stop. Keep a hand on the harness.
+- **After either one.** Reconnect (**WAKE PUPPER**), then go on, or say
+  "stop" and then "get off the board". If the app will not come back, the
+  e-stop relaxes the motors. The board guard then stays on until
+  `end_skating`, which needs the app. The only other way out is a restart,
+  with the student's OK (see "Before the day"): a person holds Pupper and
+  lifts it off the board, then `robot/stop.sh`. If Pupper cannot come off
+  the board first, a person holds it through `stop.sh`, because the legs go
+  limp. Then `robot/start.sh`. A restart clears the board guard: the new
+  server does not know Pupper was on the board, so Pupper must be off it
+  before `start.sh`.
 - **A ride drifts** to one side or the board wanders. Say "stop" first. Then
   hold Pupper and straighten the board, check the placement, and go on with
   shorter rides. E-stop if the board heads for anything, a left foot nears
@@ -216,7 +257,8 @@ lying down. "Walk forward" on the board is a good thing to show.
 - **The board does not roll.** The repo has no fix for this; these are
   checks, not known causes: the placement (left feet on the deck centre
   line, body beside the board), Pupper facing the castle end, the trucks,
-  and the floor (the policies have only rolled the board on carpet). Do not
+  and the floor (steer v6 and steer v10 have only rolled the board on
+  carpet; steer v13 has never run on the robot). Do not
   raise the speed, the carve or the gains: the limits in
   `robot/skateboard.py` are ceilings, and `skate.yaml` can only go lower.
 
@@ -224,12 +266,26 @@ Stop testing and let the motors cool if Pupper is hot or a motor faults.
 
 ## Changing policy
 
-1. In the robot's copy of the repo, set `policy:` in `skate/skate.yaml` to
-   another name under `policies:`.
-2. With the student's OK, given right then: `robot/stop.sh`, then
-   `robot/start.sh` (the robot stack reads `skate.yaml` when it starts).
-3. Check `/system/status`: the `skate` block names the new policy, with
-   `controller: "inactive"` and no `error`.
+1. Get Pupper off the board first: say "stop", a person holds Pupper, say
+   "get off the board" (`end_skating`), and lift Pupper off onto the floor.
+   On the board the server refuses the relax that `stop.sh` asks for, so
+   `stop.sh` kills the stack with the skate policy still holding the legs,
+   and Pupper drops with no "is someone holding it?" check. If Pupper
+   cannot come off first, a person holds it before `stop.sh`, because the
+   legs go limp.
+2. In the robot's copy of the repo, set `policy:` in `skate/skate.yaml` to
+   another name under `policies:`. Steer v13 has never run on the robot:
+   select it only after it has passed the gamepad ride test (test 5 of
+   pupper-mjlab's `skateboard/HARDWARE_TEST.md`) with a TA's OK.
+3. With the student's OK, given right then: `robot/stop.sh`, then
+   `robot/start.sh`. Both, always: `start.sh` alone, with the stack still
+   up, restarts only the server and leaves the old policy in the skate
+   controller (the stack reads `skate.yaml` only when it starts).
+4. Check `/system/status`: the `skate` block names the new policy, with
+   `controller: "inactive"` and no `error`. If the skate controller was
+   started with another policy file, the server turns skate mode off and
+   the `error` says to stop and start again. It cannot tell a policy file
+   replaced under the same name, which is one more reason for step 3.
 
 No tool lets Gemini change the policy. Each new policy file needs a TA's OK
 before its first run on the robot.
@@ -242,7 +298,7 @@ before its first run on the robot.
 | Sim: travel | 0.29 m per second of riding | 0.30 m per second of riding | 0.29 m per second of riding |
 | Sim: turn, gentle / medium / hard | 1.1 / 1.4 / 2.2 degrees per second | 0.8 / 0.9 / 1.1 degrees per second | 1.1 / 1.1 / 1.4 degrees per second |
 | Sim: roll after the last push | 0.1 m | 0.2 m | 0.2 m |
-| Note | the one to run first | provisional: missed its sim bar at x10 wheel drag | provisional, sim only: holds its line better (sideways drift over a 25 s ride about half as wide as v10's, still to one side); needs a TA's OK and the student's OK before its first run, like any new policy |
+| Note | the one to run first | provisional: missed its sim bar at x10 wheel drag | provisional, sim only: holds its line better (sideways drift over a 25 s ride about half as wide as v10's, still to one side); never run on the robot; must pass the gamepad ride test (test 5 of the hardware sheet) with a TA's OK before it is selected for voice, and needs the student's OK before its first run |
 
 Not tested on any of them: steering on the robot, any distance or turn, a hard
 floor, the voice tools.
