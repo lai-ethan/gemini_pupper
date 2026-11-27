@@ -514,7 +514,10 @@ class Robot:
         again, so the next motion stands up through its exit clip instead of
         jumping out of it."""
         states = await self.controller_states()
-        active = [c for c in sorted(self.leg_controllers) if states.get(c) == "active"]
+        # gemini_skate too, even with no skate config: a server restarted with a missing or broken
+        # skate.yaml still finds Pupper on the board (SKATING), where switch_to refuses every other policy.
+        active = sorted((c for c in self.leg_controllers | {SKATE_CONTROLLER} if states.get(c) == "active"),
+                        key=lambda c: (c != SKATE_CONTROLLER, c))  # the skate one first: then the board guard holds
         if active:
             self.state_now = self.state_of(active[0])
             if self.commands.empty():  # a request may already be queued: it set the state after it
@@ -687,7 +690,8 @@ class Robot:
         self.fell_off_board = on_board
         states = await self.controller_states()
         self.fell_off_board = on_board or states.get(SKATE_CONTROLLER) == "active"
-        active = [c for c in sorted(self.leg_controllers) if states.get(c) == "active"]
+        # gemini_skate always, even when this server has no skate config (only ever deactivated here)
+        active = [c for c in sorted(self.leg_controllers | {SKATE_CONTROLLER}) if states.get(c) == "active"]
         if active:
             req = SwitchController.Request()
             req.deactivate_controllers = active

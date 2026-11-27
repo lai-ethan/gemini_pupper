@@ -183,7 +183,7 @@ def load_skate(skate_dir: Path = SKATE_DIR) -> SkateConfig | None:
     if not isinstance(spec, dict):
         fail("empty, or not a mapping of the fields in skateboard.py")
     if any(k in spec for k in OLD_LAYOUT_KEYS) or str(spec.get("policy", "")).endswith(".json"):
-        fail("skate.yaml uses the old single-policy layout; see skate/README.md")
+        fail("uses the old single-policy layout; move the estimates into an entry under policies (see the skate README)")
 
     def num(table: dict, key: str, where: str = "") -> float:
         if key not in table:
@@ -237,7 +237,7 @@ def load_skate(skate_dir: Path = SKATE_DIR) -> SkateConfig | None:
     if not policy_path.exists():
         fail(f"{at}file: the policy {shown} is not there; copy it into the skate folder (see the skate README)")
     if not policy_path.is_file():
-        fail(f"{at}file: {entry['file']!r} is not a file")
+        fail(f"{at}file: {_show(entry['file'])} is not a file")
     try:
         policy = json.loads(policy_path.read_text())
     except (OSError, UnicodeDecodeError, ValueError, RecursionError) as e:
@@ -262,10 +262,14 @@ def load_skate(skate_dir: Path = SKATE_DIR) -> SkateConfig | None:
     if speed > MAX_SPEED + 1e-6:
         fail(f"speed {speed:g} is over the {MAX_SPEED:g} m/s ceiling")
     carve = sharp(spec, "carve")
-    lowest = num(hold, "yaw_threshold", f"the policy {shown}'s heading_hold ") if "yaw_threshold" in hold else 0.0
-    lowest += CARVE_MARGIN
+    threshold = num(hold, "yaw_threshold", f"the policy {shown}'s heading_hold ") if "yaw_threshold" in hold else 0.0
+    if threshold < 0.0:  # a negative threshold would let a negative carve through the bound below
+        fail(f"the policy {shown}'s heading_hold yaw_threshold {threshold:g} must be 0 or more")
+    lowest = threshold + CARVE_MARGIN
     top_carve = min(abs(clip["wz"][0]), abs(clip["wz"][1]))
     for s, wz in carve.items():
+        if not wz > 0.0:  # on its own, whatever the policy file says (the ceiling is checked below)
+            fail(f"carve {s} {wz:g} must be above 0 (the tool picks left or right)")
         if not lowest - 1e-6 <= wz <= top_carve + 1e-6:
             fail(f"carve {s} {wz:g} must be from {lowest:g} (clear of the heading hold)"
                  f" to {top_carve:g} rad/s (the policy's clip)")

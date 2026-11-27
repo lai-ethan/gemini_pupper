@@ -1601,9 +1601,13 @@ async def skate_catalogue() -> None:
     outside.write_text(json.dumps(_POLICY_CLIP))
     sub = _write_skate()
     (sub / "policies").mkdir()
+    # A real policy file one level up, so only the path check can refuse it (not "the policy is not there").
+    up = Path(tempfile.mkdtemp(prefix="gemini_pupper_up_"))
+    (up / "policy.json").write_text(json.dumps(_POLICY_CLIP))
+    up_skate = _write_skate(file="../policy.json").rename(up / "skate")
     for what, d, word in [
-        ("a policy file given as an absolute path", _write_skate(file=str(outside)), "skate folder"),
-        ("a policy file outside the skate folder (..)", _write_skate(file="../policy.json"), "skate folder"),
+        ("a policy file given as an absolute path", _write_skate(file=str(outside)), "must be a path inside"),
+        ("a policy file outside the skate folder (..), there one level up", up_skate, "must be a path inside"),
         ("a policy file that is a folder", _write_skate(file="."), "not a file"),
         ("a heading_hold of 0", _write_skate(policy={**_POLICY_CLIP, "heading_hold": 0}), "heading_hold"),
         ("a heading_hold of []", _write_skate(policy={**_POLICY_CLIP, "heading_hold": []}), "heading_hold"),
@@ -1625,6 +1629,37 @@ async def skate_catalogue() -> None:
           _load_error(within))
     check("a heading_hold of null means no hold, and loads",
           _load_error(_write_skate(policy={**_POLICY_CLIP, "heading_hold": None})) == "")
+
+    # Final review: a carve's size is checked on its own, whatever the policy's heading hold says.
+    def hold(threshold) -> dict:
+        return {**_POLICY_CLIP, "heading_hold": {**_POLICY_CLIP["heading_hold"], "yaw_threshold": threshold}}
+
+    for what, d, words in [
+        ("a heading_hold yaw_threshold below 0", _write_skate(policy=hold(-0.2)), ("yaw_threshold", "0")),
+        ("a negative yaw_threshold with carve gentle -0.9 (it would pass the hold's lower bound)",
+         _write_skate(policy=hold(-0.94), carve={"gentle": -0.9, "medium": 0.3, "hard": 0.5}), ("yaw_threshold",)),
+        ("a yaw_threshold that is not a number", _write_skate(policy=hold("low")), ("yaw_threshold",)),
+        ("a yaw_threshold of NaN", _write_skate(policy='{"command_clip": {"vx": [0.0, 0.3], "wz": [-0.6, 0.6]},'
+                                                      ' "heading_hold": {"yaw_threshold": NaN}}'), ("yaw_threshold",)),
+        ("a carve below 0", _write_skate(carve={"gentle": -0.15, "medium": 0.3, "hard": 0.5}), ("gentle", "above 0")),
+        ("a carve of 0", _write_skate(policy={**_POLICY_CLIP, "heading_hold": None},
+                                      carve={"gentle": 0, "medium": 0.3, "hard": 0.5}), ("gentle", "above 0")),
+    ]:
+        err = _load_error(d)
+        check(f"{what} is refused, naming the key", err.startswith("skate.yaml: ") and all(w in err for w in words)
+              and "not a SkateConfigError" not in err, f"error: {err!r}")
+    check("a heading_hold yaw_threshold of 0 still loads", _load_error(_write_skate(policy=hold(0.0))) == "",
+          _load_error(_write_skate(policy=hold(0.0))))
+
+    # Final review: what a bad config says stays short and is read out plainly.
+    old_said = _load_error(bad_cases[0][1])
+    check("the old-layout error names skate.yaml once and reads no path aloud",
+          old_said.count("skate.yaml") == 1 and "/" not in old_said, f"error: {old_said!r}")
+    long_dir = _write_skate(file="x" * 80)
+    (long_dir / ("x" * 80)).mkdir()
+    said = _load_error(long_dir)
+    check("a policy file that is a folder with a long name: the error cuts the name short",
+          "not a file" in said and "x" * 80 not in said and len(said) < 120, f"error: {said!r}")
 
     real_load = skateboard.load_skate
     skateboard.load_skate = lambda skate_dir=skateboard.SKATE_DIR: [][0]  # a bug in the loader: IndexError
@@ -1702,6 +1737,34 @@ async def skate_robot() -> None:
               rig.ts.skate is None and SKATE_CONTROLLER not in rig.ts.leg_controllers)
     finally:
         rig.close()
+    # Final review: a server restarted with no skate config (or a broken one) while gemini_skate still
+    # holds the legs. It must not walk or play a trick from there, and the gamepad e-stop relaxes it.
+    for what, error in [("no skate.yaml", None), ("a broken skate.yaml", "skate.yaml: missing coast_m")]:
+        rig = Rig(skate_error=error)
+        try:
+            rig.robot.controllers[LOCOMOTION_CONTROLLER] = "inactive"
+            rig.robot.controllers[SKATE_CONTROLLER] = "active"
+            rig.ts.worker.cancel()
+            rig.ts = Robot()  # a fresh server, the skate policy still holding the legs
+            await rig.settle()
+            check(f"{what}, {SKATE_CONTROLLER} active at start: the server starts in skate mode, on the board",
+                  rig.ts.skate is None and rig.ts.state_now == SKATING, f"state_now {rig.ts.state_now}")
+            switches = len(rig.robot.switches)
+            for tool, args in [("stand_up", {}), ("move", {"direction": "forward", "duration": 1.0}),
+                               ("play_trick", {"name": "bow"}), ("lie_down", {})]:
+                res = await rig.call(tool, **args)
+                check(f"... {tool} is refused there and nothing switches", not res.ok
+                      and len(rig.robot.switches) == switches and rig.robot.active() == {SKATE_CONTROLLER},
+                      f"got {res}; active {sorted(rig.robot.active())}")
+            rig.robot.send("/emergency_stop", _DataMsg())
+            await rig.settle()
+            check(f"... and the gamepad e-stop relaxes {SKATE_CONTROLLER}", SKATE_CONTROLLER not in rig.robot.active()
+                  and rig.robot.deactivations(SKATE_CONTROLLER) and rig.ts.fell_off_board,
+                  f"active {sorted(rig.robot.active())}; fell_off_board {rig.ts.fell_off_board}")
+            check("... and the server never tried to activate it", not rig.robot.activations(SKATE_CONTROLLER),
+                  f"switches {rig.robot.switches}")
+        finally:
+            rig.close()
     rig = Rig(skate=fixture_skate())
     try:
         check("with one installed, the skate controller is a leg controller",
