@@ -6,22 +6,31 @@ Gemini calling the skate tools. Read it through once before the day.
 Read this first:
 
 - **The skate tools in this repo have never run on the robot.** Everything
-  below that says what Pupper will do comes from the code and the desk tests
-  (`python3 lab/test.py skate_demo` scripts this whole demo on a fake robot,
-  for every policy in `skate.yaml`).
+  below that says what Pupper will do comes from the code and the desk tests.
+  `python3 lab/test.py skate_demo` runs the demo's tool calls on a fake
+  robot, for every policy in `skate.yaml`: start (refused until placed),
+  walking refused, a forward ride, gentle and hard carves, "stop", the
+  gamepad e-stop, a tilt fall and getting off. It does not cover what Gemini
+  says or asks, the debug panel's STOP, the app disconnecting (other desk
+  tests in the `skate` group cover those two), or anything on the real
+  robot.
 - **Every distance and turn is a sim estimate**, from pupper-mjlab's
   `skateboard/tools/timed_ride.py` (16 boards, 5 s rides). None has been
   measured on the robot.
 - What has happened on the robot so far: on 2026-11-26, driven by gamepad
   (not through Gemini Pupper), steer v6 and steer v10 each rolled the board
   forward on carpet for a whole clip. Nothing was measured.
-- The board drifts sideways over long rides in sim (tens of cm in 25 s), and
-  probably does on the robot too. Keep rides short.
+- The board drifts sideways over long rides in sim (tens of cm in 25 s).
+  The 2026-11-26 clips showed it drift too; not measured. Keep rides short.
 - The gamepad e-stop (right-stick press) outranks everything. One person
   holds it, one keeps a hand on the harness, the whole time.
 
 ## Before the day
 
+- [ ] **The student's explicit OK, right then, before `robot/start.sh`**,
+      with them at the robot and a hand near the e-stop (AGENTS.md, safety
+      rule 1). Ask again after any policy change, before the restart, and
+      before the first ride of the new policy.
 - [ ] **A TA's OK for each policy file you may run** (`policies/` in this
       folder, listed in `skate.yaml`). AGENTS.md: a new policy needs a TA's
       OK before its first run on the robot. The repo does not say how the OK
@@ -51,7 +60,8 @@ Read this first:
 ## Start
 
 1. Pupper lies on the floor, away from the board.
-2. Start the robot the normal way (README, "Running"): on the Pupper,
+2. Only with the student's OK, given right then (see "Before the day").
+   Start the robot the normal way (README, "Running"): on the Pupper,
    `robot/start.sh` (or `robot/start.sh --kiosk` for the app on Pupper's own
    screen). From a laptop, open the SSH tunnel the README gives, open
    http://localhost:8000, open **Settings**, paste the key and press
@@ -177,7 +187,9 @@ lying down. "Walk forward" on the board is a good thing to show.
   the motors. The panel's other buttons (walk, trick, stand, lie down) are
   refused on the board.
 - **The gamepad e-stop** (right-stick press). The motors relax at once,
-  whatever Gemini is doing. Pupper is still on the board, so the board guard
+  whatever Gemini is doing. After it is pressed, a ride command or two may
+  still go out for up to about a tenth of a second before the motors relax
+  (measured on the desk test's clock, not on the robot). Pupper is still on the board, so the board guard
   stays on: "stand up" is refused, and `robot_status` says the motors are
   relaxed on the board. To go on: place Pupper again if it moved, and say
   "start skating" (Gemini asks whether it is placed). To get off instead:
@@ -193,6 +205,10 @@ lying down. "Walk forward" on the board is a good thing to show.
   disconnect off the board, which lies Pupper down. Keep a hand on the
   harness. Reconnect (**WAKE PUPPER**), then go on, or say "get off the
   board". If the app will not come back, the e-stop relaxes the motors.
+  The board guard then stays on until `end_skating`, which needs the app.
+  The only other way out is `robot/stop.sh`, then `robot/start.sh`, with a
+  person holding Pupper and the student's OK (see "Before the day"); lift
+  Pupper off the board before starting again.
 - **A ride drifts** to one side or the board wanders. Say "stop" first. Then
   hold Pupper and straighten the board, check the placement, and go on with
   shorter rides. E-stop if the board heads for anything, a left foot nears
@@ -210,8 +226,8 @@ Stop testing and let the motors cool if Pupper is hot or a motor faults.
 
 1. In the robot's copy of the repo, set `policy:` in `skate/skate.yaml` to
    another name under `policies:`.
-2. `robot/stop.sh`, then `robot/start.sh` (the robot stack reads
-   `skate.yaml` when it starts).
+2. With the student's OK, given right then: `robot/stop.sh`, then
+   `robot/start.sh` (the robot stack reads `skate.yaml` when it starts).
 3. Check `/system/status`: the `skate` block names the new policy, with
    `controller: "inactive"` and no `error`.
 

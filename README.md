@@ -106,8 +106,9 @@ python3 lab/chat.py --robot    # your tools on the real Pupper (through the robo
 
 ## Tricks
 
-Every trick is played by policies, so the robot is always in one simple state: locomotion,
-one trick (trick mode), motors idle, fallen, or skating (on the skateboard; see `skate/`). Each folder under `tricks/` with a `trick.yaml` is a
+Every trick is played by policies, so the robot is always in one simple state:
+locomotion, one trick (trick mode), motors idle, fallen, or skating (on the
+skateboard; see `skate/`). Each folder under `tricks/` with a `trick.yaml` is a
 trick Gemini can play (`robot/tricks.py` lists the fields). Tricks are trained
 in [pupper-mjlab](https://github.com/cs123-stanford/pupper-mjlab); training
 puts the policy on W&B, and one command fetches it:
