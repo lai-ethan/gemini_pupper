@@ -26,7 +26,7 @@ from __future__ import annotations
 
 from part3_follow import prepare_to_move
 from robot_api import FALLEN, FELL_MESSAGE, LLM_CMD_RATE, MOTORS_IDLE, WALK_READY_S, Result, Robot, state_name, with_note
-from skateboard import FELL_ON_BOARD_MESSAGE, MIN_RIDE_S, NOT_INSTALLED, SHARPNESS, SKATE_CONTROLLER, SKATING, SkateConfig
+from skateboard import FELL_ON_BOARD_MESSAGE, MIN_RIDE_S, SHARPNESS, SKATE_CONTROLLER, SKATING, SkateConfig, not_installed_message
 from tool_registry import Param, tool
 
 PLACEMENT = "left feet on the deck, right feet on the floor, body parallel to the board, a hand on the harness"
@@ -53,7 +53,7 @@ async def start_skating(robot: Robot, placed: bool) -> Result:
     """Hand the legs to the skate policy, once a person has placed Pupper on the board."""
     cfg = robot.skate
     if cfg is None:  # (1) now
-        return Result(False, NOT_INSTALLED)
+        return Result(False, not_installed_message(robot.skate_error))
     state = robot.state_after_queue
     if state == SKATING:
         return Result(True, "already in skate mode, on the board")
@@ -83,7 +83,7 @@ async def ride(robot: Robot, seconds: float, direction: str = "straight", sharpn
     """Ride forward for ``seconds``, straight or carving left or right, then stop pushing."""
     cfg = robot.skate
     if cfg is None:  # (1) now
-        return Result(False, NOT_INSTALLED)
+        return Result(False, not_installed_message(robot.skate_error))
     if robot.fallen:
         return Result(False, fell(robot))
     if robot.state_after_queue != SKATING:

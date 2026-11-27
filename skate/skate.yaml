@@ -1,18 +1,28 @@
 # Skate mode for Gemini Pupper. Read by robot/skateboard.py; see its docstring.
-# The policy is pupper-mjlab's skateboard/policies/split_steer_v6_max0.3_policy.json.
-policy: policy.json
-speed: 0.3            # m/s: the only speed checked in sim; the policy clips here
+# To change policy: set `policy` to another name below, then restart the
+# robot stack (robot/stop.sh, robot/start.sh). A new policy needs a TA's OK.
+policy: steer_v6
+speed: 0.3            # m/s: the only speed checked in sim; the policies clip here
 carve:                # yaw command, rad/s (0 rides straight)
   gentle: 0.15
   medium: 0.3
   hard: 0.5           # not 0.6: one sim env lost the board there
-# Estimates from simulation (pupper-mjlab skateboard/tools/timed_ride.py).
-travel_m_per_s: 0.29
-turn_deg_per_s:
-  gentle: 1.1
-  medium: 1.4
-  hard: 2.2
-coast_m: 0.1
 default_seconds: 3
 max_seconds: 5
 queue_max_seconds: 10
+# One entry per policy file. The numbers are estimates from simulation
+# (pupper-mjlab skateboard/tools/timed_ride.py, 16 boards, 5 s rides), not
+# measurements. `tested` says what the policy has done on the real robot.
+policies:
+  steer_v6:
+    file: policies/split_steer_v6_max0.3_policy.json
+    tested: "robot 2026-11-26: rolled forward on carpet by gamepad; not measured"
+    travel_m_per_s: 0.29
+    turn_deg_per_s: {gentle: 1.1, medium: 1.4, hard: 2.2}
+    coast_m: 0.1
+  steer_v10:
+    file: policies/split_steer_v10_max0.3_policy.json
+    tested: "robot 2026-11-26: rolled forward on carpet by gamepad; not measured. Provisional: missed its sim bar at x10 wheel drag"
+    travel_m_per_s: 0.30
+    turn_deg_per_s: {gentle: 0.8, medium: 0.9, hard: 1.1}
+    coast_m: 0.2

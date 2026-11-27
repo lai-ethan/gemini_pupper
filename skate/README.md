@@ -4,10 +4,19 @@ Voice control for Pupper on the skateboard (CS 123 Team 9 final project).
 Tools: `lab/part8_skate.py`. Numbers: `skate.yaml`. Config loader:
 `robot/skateboard.py`.
 
-- `policy.json` is pupper-mjlab's
-  `skateboard/policies/split_steer_v6_max0.3_policy.json`. To change policy,
-  copy the new file over it and re-measure the estimates in `skate.yaml` with
-  pupper-mjlab's `skateboard/tools/timed_ride.py`.
+- `policies/` holds copies of pupper-mjlab's `skateboard/policies/` files
+  (steer v6 and steer v10). `skate.yaml` lists them under `policies:`, each
+  with its file, what it has done on the robot (`tested`) and its sim
+  estimates; `policy:` names the one the robot runs. To change policy, set
+  `policy:` to another name and restart the robot stack. To add one, copy the
+  file into `policies/`, add an entry and measure its estimates with
+  pupper-mjlab's `skateboard/tools/timed_ride.py`. A new policy needs a TA's
+  OK before its first run on the robot.
+- The old layout (`policy: policy.json` with `travel_m_per_s`,
+  `turn_deg_per_s` and `coast_m` at the top level) is refused: move those
+  three into an entry under `policies:`.
+- A bad `skate.yaml` does not stop the robot: skate mode is off, the error is
+  logged, and the skate tools tell Gemini the config has an error.
 - What a person says: "lie down", place Pupper, "start skating", "go
   forward", "turn left", "stop", hold Pupper, "get off the board".
 - Pupper cannot measure distance or see obstacles. Commands are timed
@@ -38,5 +47,6 @@ Tools: `lab/part8_skate.py`. Numbers: `skate.yaml`. Config loader:
   hardware checklist is test 6 in pupper-mjlab's
   `skateboard/HARDWARE_TEST.md`.
 
-Nothing here has run on the robot yet. The numbers in `skate.yaml` are sim
-estimates from `timed_ride.py` (16 envs, 5 s ride, steer v6), not measurements.
+Voice skating has not run on the robot yet (each entry's `tested` says what
+its policy has done there). The numbers in `skate.yaml` are sim estimates
+from `timed_ride.py` (16 envs, 5 s ride), not measurements.

@@ -33,7 +33,7 @@ PARAMS = str(HERE / "gemini_pupper.yaml")
 sys.path.insert(0, str(HERE.parent))
 from spawn_controllers import PARAM_FILE as TRICK_PARAMS  # noqa: E402
 from tricks import WALK_CONTROLLER, controller_params, load_tricks, walk_controller_params, walk_policy_params  # noqa: E402
-from skateboard import SKATE_CONTROLLER, load_skate, skate_controller_params  # noqa: E402
+from skateboard import SKATE_CONTROLLER, load_skate_safe, skate_controller_params  # noqa: E402
 
 COURSE_CONFIG = PathJoinSubstitution([FindPackageShare("neural_controller"), "launch", "config.yaml"])
 
@@ -54,7 +54,9 @@ def gemini_controllers():
         params[t.controller] = {"ros__parameters": {**kind, **controller_params(t, base)}}
         if t.walks:  # a trick that walks in its own stance: its walking policy too
             params[t.walk_controller] = {"ros__parameters": {**kind, **walk_policy_params(t, base)}}
-    skate = load_skate()  # skate/skate.yaml: the skateboard policy, if installed
+    skate, skate_error = load_skate_safe()  # skate/skate.yaml: the skateboard policy, if installed
+    if skate_error:  # a bad skate.yaml turns skate mode off; the rest of the robot still starts
+        print(f"gemini_pupper: skate mode is off: {skate_error}", file=sys.stderr)
     if skate is not None:
         params[SKATE_CONTROLLER] = {"ros__parameters": {**kind, **skate_controller_params(skate, base)}}
     # The course config writes paths as $(find-pkg-share pkg)/...; the spawner's

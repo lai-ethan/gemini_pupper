@@ -75,7 +75,7 @@ from std_srvs.srv import Trigger
 
 from spawn_controllers import LOADED, spawn
 from tricks import TRICK_FADE_S, TRICK_INIT_S, WALK_CONTROLLER, WALK_READY_S, Trick, load_tricks, reference_message_data
-from skateboard import FELL_ON_BOARD_MESSAGE, ON_BOARD_MESSAGE, SKATE_CONTROLLER, SKATING, STOPPED_ON_BOARD_MESSAGE, load_skate
+from skateboard import FELL_ON_BOARD_MESSAGE, ON_BOARD_MESSAGE, SKATE_CONTROLLER, SKATING, STOPPED_ON_BOARD_MESSAGE, load_skate_safe
 
 
 log = logging.getLogger("robot_api")
@@ -225,7 +225,10 @@ class Robot:
         threading.Thread(target=self.executor.spin, daemon=True).start()
 
         self.tricks: dict[str, Trick] = load_tricks()
-        self.skate = load_skate()  # None: no skate policy installed
+        # None: no skate policy installed, or (skate_error) skate.yaml is wrong: skate mode is off, the rest runs
+        self.skate, self.skate_error = load_skate_safe()
+        if self.skate_error:
+            log.error("skate mode is off: %s", self.skate_error)
         self.leg_controllers = (LEG_CONTROLLERS | {t.controller for t in self.tricks.values() if t.kind == "policy"}
                                 | {t.walk_controller for t in self.tricks.values() if t.walks}
                                 | ({SKATE_CONTROLLER} if self.skate else set()))

@@ -1,4 +1,4 @@
-"""The skateboard: skate/skate.yaml and the skate policy next to it.
+"""The skateboard: skate/skate.yaml and the catalogue of skate policies it lists.
 
 Pupper rides a mini cruiser in a split stance: left feet on the deck, right
 feet pushing on the floor. One policy (pupper-mjlab's
@@ -12,21 +12,30 @@ mode is started by a person who has placed Pupper, every command is timed and
 short, and the numbers Gemini reads are estimates from simulation.
 
 skate.yaml fields:
-  policy              the policy JSON, in this folder
+  policy              the name of the policy to run: one of the entries under policies
   speed               m/s the board is asked to roll at (one speed only)
   carve               gentle / medium / hard -> yaw command in rad/s
-  travel_m_per_s      sim estimate: metres per second of riding
-  turn_deg_per_s      gentle / medium / hard -> sim estimate of the board's turn
-  coast_m             sim estimate: how far the board rolls after the last command
   default_seconds     a command's length when Gemini gives none
   max_seconds         the longest single command
   queue_max_seconds   the most riding that can be queued (at most MAX_RIDE_S)
+  policies            name -> one entry per policy file:
+    file              the policy JSON, relative to this folder
+    tested            what the policy has done on the real robot
+    travel_m_per_s    sim estimate: metres per second of riding
+    turn_deg_per_s    gentle / medium / hard -> sim estimate of the board's turn
+    coast_m           sim estimate: how far the board rolls after the last command
 
-The ceilings below are hard: skate.yaml can only go lower. A value above one,
-a missing key or a missing policy clip is a ValueError naming the file and key.
+Only the selected entry is loaded; the robot runs one skate policy, and no tool
+lets Gemini change it. The ceilings below are hard: skate.yaml can only go
+lower. A value above one, a missing key, a value of the wrong type or a policy
+file that is missing or not a policy is a SkateConfigError naming the file and
+key. A skate.yaml in the old single-policy layout (a policy file and the
+estimates at the top level) is one too.
 
 No skate.yaml means no skate mode: load_skate returns None and the skate
-tools say nothing is installed.
+tools say nothing is installed. The robot and the launch file use
+load_skate_safe: a bad skate.yaml turns skate mode off (the tools say why)
+instead of stopping the robot from starting.
 
 This module has no ROS imports, so the launch file can use it too.
 """
@@ -71,12 +80,26 @@ STOPPED_ON_BOARD_MESSAGE = (
     " held=true; once they have lifted Pupper off the board, stand_up gets it walking again"
 )
 NOT_INSTALLED = "no skate policy is installed on this robot (skate/skate.yaml is missing), so Pupper can't skate"
+OLD_LAYOUT_KEYS = ("travel_m_per_s", "turn_deg_per_s", "coast_m")  # top-level keys of the old single-policy skate.yaml
+
+
+class SkateConfigError(ValueError):
+    """skate.yaml or the policy it selects is wrong. The message names the file and the key."""
+
+
+def not_installed_message(error: str | None) -> str:
+    """What the skate tools say when skate mode is off: not installed, or a config error (load_skate_safe)."""
+    if error is None:
+        return NOT_INSTALLED
+    return f"skate mode is off on this robot because its config has an error ({error}), so Pupper can't skate"
 
 
 @dataclass
 class SkateConfig:
     """How Pupper skates: what it is commanded, and what Gemini is told to expect."""
 
+    name: str  # the catalogue key in skate.yaml's policies
+    tested: str  # what the policy has done on the real robot
     policy_path: Path
     speed: float  # m/s
     carve: dict[str, float]  # sharpness -> yaw command, rad/s
@@ -99,72 +122,127 @@ class SkateConfig:
 
 
 def load_skate(skate_dir: Path = SKATE_DIR) -> SkateConfig | None:
-    """The skate config, or None when skate.yaml is not there. Raises ValueError
-    for a missing key, numbers the policy was not trained on or that are over the limits."""
+    """The selected policy's skate config, or None when skate.yaml is not there. Raises
+    SkateConfigError for a missing key, a value of the wrong type, numbers the policy was
+    not trained on or that are over the limits."""
     spec_path = skate_dir / "skate.yaml"
     if not spec_path.exists():
         return None
-    spec = yaml.safe_load(spec_path.read_text())
+
+    def fail(text: str):
+        raise SkateConfigError(f"{spec_path}: {text}")
+
+    try:
+        spec = yaml.safe_load(spec_path.read_text())
+    except (OSError, UnicodeDecodeError, yaml.YAMLError) as e:
+        fail(f"not readable as YAML ({type(e).__name__}: {e})")
     if not isinstance(spec, dict):
-        raise ValueError(f"{spec_path}: empty, or not a mapping of the fields in robot/skateboard.py")
+        fail("empty, or not a mapping of the fields in robot/skateboard.py")
+    if any(k in spec for k in OLD_LAYOUT_KEYS) or str(spec.get("policy", "")).endswith(".json"):
+        fail("skate.yaml uses the old single-policy layout; see skate/README.md")
 
     def num(table: dict, key: str, where: str = "") -> float:
         if key not in table:
-            raise ValueError(f"{spec_path}: missing {where}{key}")
+            fail(f"missing {where}{key}")
         try:
             return float(table[key])
         except (TypeError, ValueError):
-            raise ValueError(f"{spec_path}: {where}{key} must be a number, not {table[key]!r}") from None
+            fail(f"{where}{key} must be a number, not {table[key]!r}")
+
+    def sharp(table: dict, key: str, where: str = "") -> dict[str, float]:
+        """A gentle / medium / hard table of numbers."""
+        value = table.get(key)
+        if not isinstance(value, dict):
+            fail(f"{where}{key} must be a mapping of {list(SHARPNESS)}, not {value!r}")
+        missing = [s for s in SHARPNESS if s not in value]
+        if missing:
+            fail(f"{where}{key} needs {list(SHARPNESS)}; missing {missing}")
+        return {s: num(value, s, f"{where}{key} ") for s in SHARPNESS}
 
     if "policy" not in spec:
-        raise ValueError(f"{spec_path}: missing policy")
-    policy_path = skate_dir / str(spec["policy"])
-    if not policy_path.exists():
-        raise ValueError(f"{spec_path}: the policy {policy_path.name} is not in {skate_dir}; copy it there"
-                         " (see skate/README.md)")
-    policy = json.loads(policy_path.read_text())
+        fail("missing policy")
+    name = spec["policy"]
+    if not isinstance(name, str):
+        fail(f"policy must be the name of an entry under policies, not {name!r}")
+    catalogue = spec.get("policies")
+    if not isinstance(catalogue, dict) or not catalogue:
+        fail(f"policies must be a mapping of policy names to entries, not {catalogue!r}")
+    if name not in catalogue:
+        fail(f"policy {name!r} is not one of {', '.join(map(str, catalogue))}")
+    entry = catalogue[name]
+    at = f"policies.{name}."
+    if not isinstance(entry, dict):
+        fail(f"policies.{name} must be a mapping (file, tested and the sim estimates), not {entry!r}")
+    for key in ("file", "tested"):
+        if not isinstance(entry.get(key), str) or not entry[key].strip():
+            fail(f"{at}{key} must be text, not {entry.get(key)!r}" if key in entry else f"missing {at}{key}")
+    policy_path = skate_dir / entry["file"]
+    if not policy_path.is_file():
+        fail(f"{at}file: the policy {policy_path.name} is not in {policy_path.parent}; copy it there"
+             " (see skate/README.md)")
+    try:
+        policy = json.loads(policy_path.read_text())
+    except (OSError, UnicodeDecodeError, ValueError) as e:
+        fail(f"{at}file: the policy {policy_path.name} is not readable as JSON ({type(e).__name__}: {e})")
+    if not isinstance(policy, dict):
+        fail(f"{at}file: the policy {policy_path.name} is not a JSON object, so it is not a policy")
     clip = policy.get("command_clip")
-    if not isinstance(clip, dict) or not all(isinstance(clip.get(k), list) and len(clip[k]) == 2 for k in ("vx", "wz")):
-        raise ValueError(f"{spec_path}: the policy {policy_path.name} has no command_clip with vx and wz ranges")
+    if not isinstance(clip, dict) or not all(
+            isinstance(clip.get(k), list) and len(clip[k]) == 2
+            and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in clip[k]) for k in ("vx", "wz")):
+        fail(f"{at}file: the policy {policy_path.name} has no command_clip with vx and wz ranges")
     hold = policy.get("heading_hold") or {}
+    if not isinstance(hold, dict):
+        fail(f"{at}file: the policy {policy_path.name}'s heading_hold must be a mapping, not {hold!r}")
     speed = num(spec, "speed")
     top_speed = max(clip["vx"])
     if not 0.0 < speed <= top_speed + 1e-6:
-        raise ValueError(f"{spec_path}: speed {speed:g} must be above 0 and at most {top_speed:g} m/s, the policy's clip")
+        fail(f"speed {speed:g} must be above 0 and at most {top_speed:g} m/s, the policy's clip")
     if speed > MAX_SPEED + 1e-6:
-        raise ValueError(f"{spec_path}: speed {speed:g} is over the {MAX_SPEED:g} m/s ceiling")
-    for table in ("carve", "turn_deg_per_s"):
-        missing = [s for s in SHARPNESS if s not in (spec.get(table) or {})]
-        if missing:
-            raise ValueError(f"{spec_path}: {table} needs {list(SHARPNESS)}; missing {missing}")
-    carve = {s: num(spec["carve"], s, "carve ") for s in SHARPNESS}
-    lowest = float(hold.get("yaw_threshold", 0.0)) + CARVE_MARGIN
+        fail(f"speed {speed:g} is over the {MAX_SPEED:g} m/s ceiling")
+    carve = sharp(spec, "carve")
+    lowest = num(hold, "yaw_threshold", f"the policy {policy_path.name}'s heading_hold ") if "yaw_threshold" in hold \
+        else 0.0
+    lowest += CARVE_MARGIN
     top_carve = min(abs(clip["wz"][0]), abs(clip["wz"][1]))
     for s, wz in carve.items():
         if not lowest - 1e-6 <= wz <= top_carve + 1e-6:
-            raise ValueError(f"{spec_path}: carve {s} {wz:g} must be from {lowest:g} (clear of the heading hold)"
-                             f" to {top_carve:g} rad/s (the policy's clip)")
+            fail(f"carve {s} {wz:g} must be from {lowest:g} (clear of the heading hold)"
+                 f" to {top_carve:g} rad/s (the policy's clip)")
         if wz > MAX_CARVE + 1e-6:
-            raise ValueError(f"{spec_path}: carve {s} {wz:g} is over the {MAX_CARVE:g} rad/s ceiling")
+            fail(f"carve {s} {wz:g} is over the {MAX_CARVE:g} rad/s ceiling")
     if not carve["gentle"] < carve["medium"] < carve["hard"]:
-        raise ValueError(f"{spec_path}: carve must get sharper from gentle to medium to hard, not {carve}")
-    turn = {s: num(spec["turn_deg_per_s"], s, "turn_deg_per_s ") for s in SHARPNESS}
-    travel, coast = num(spec, "travel_m_per_s"), num(spec, "coast_m")
+        fail(f"carve must get sharper from gentle to medium to hard, not {carve}")
+    turn = sharp(entry, "turn_deg_per_s", at)
+    travel, coast = num(entry, "travel_m_per_s", at), num(entry, "coast_m", at)
     estimates = {"travel_m_per_s": travel, "coast_m": coast, **{f"turn_deg_per_s {s}": v for s, v in turn.items()}}
     for key, v in estimates.items():
         if not v > 0.0:
-            raise ValueError(f"{spec_path}: the estimate {key} {v:g} must be above 0 (measure it in sim)")
+            fail(f"the estimate {at}{key} {v:g} must be above 0 (measure it in sim)")
     default_s, max_s, queue_s = (num(spec, k) for k in ("default_seconds", "max_seconds", "queue_max_seconds"))
     if queue_s > MAX_RIDE_S + 1e-6:
-        raise ValueError(f"{spec_path}: queue_max_seconds {queue_s:g} is more than {MAX_RIDE_S:g} s")
+        fail(f"queue_max_seconds {queue_s:g} is more than {MAX_RIDE_S:g} s")
     if not MIN_RIDE_S <= max_s <= queue_s:
-        raise ValueError(f"{spec_path}: max_seconds {max_s:g} must be from {MIN_RIDE_S:g} s to queue_max_seconds {queue_s:g}")
+        fail(f"max_seconds {max_s:g} must be from {MIN_RIDE_S:g} s to queue_max_seconds {queue_s:g}")
     if max_s > MAX_COMMAND_S + 1e-6:
-        raise ValueError(f"{spec_path}: max_seconds {max_s:g} is over the {MAX_COMMAND_S:g} s ceiling")
+        fail(f"max_seconds {max_s:g} is over the {MAX_COMMAND_S:g} s ceiling")
     if not MIN_RIDE_S <= default_s <= max_s:
-        raise ValueError(f"{spec_path}: default_seconds {default_s:g} must be from {MIN_RIDE_S:g} s to max_seconds {max_s:g}")
-    return SkateConfig(policy_path=policy_path, speed=speed, carve=carve, travel_m_per_s=travel, turn_deg_per_s=turn,
-                       coast_m=coast, default_seconds=default_s, max_seconds=max_s, queue_max_seconds=queue_s)
+        fail(f"default_seconds {default_s:g} must be from {MIN_RIDE_S:g} s to max_seconds {max_s:g}")
+    return SkateConfig(name=name, tested=entry["tested"], policy_path=policy_path, speed=speed, carve=carve,
+                       travel_m_per_s=travel, turn_deg_per_s=turn, coast_m=coast, default_seconds=default_s,
+                       max_seconds=max_s, queue_max_seconds=queue_s)
+
+
+def load_skate_safe(skate_dir: Path = SKATE_DIR) -> tuple[SkateConfig | None, str | None]:
+    """load_skate that never raises, for the robot and the launch file: (config, None);
+    (None, None) when skate.yaml is not there; (None, the error) when it is wrong, so
+    skate mode is off but the rest of the robot still starts."""
+    try:
+        return load_skate(skate_dir), None
+    except SkateConfigError as e:
+        return None, str(e)
+    except Exception as e:  # a bug in the checks above must not stop the robot either
+        return None, f"{skate_dir / 'skate.yaml'}: could not be loaded ({type(e).__name__}: {e})"
 
 
 def skate_controller_params(cfg: SkateConfig, base: dict) -> dict:

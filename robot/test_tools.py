@@ -307,7 +307,9 @@ def fixture_tricks() -> dict[str, Trick]:
 class Rig:
     """A fresh Robot wired to a fresh fake robot, standing in locomotion mode."""
 
-    def __init__(self, tricks=None, skate=None):
+    def __init__(self, tricks=None, skate=None, skate_error=None):
+        """skate: the SkateConfig the robot loads (None: not installed); skate_error:
+        instead, the message of a skate.yaml that failed to load (skate mode off)."""
         global ROBOT
         self.clock = VirtualClock()
         ROBOT = self.robot = FakeRobot(self.clock)
@@ -315,7 +317,7 @@ class Rig:
         robot_api.time = types.SimpleNamespace(monotonic=self.clock.monotonic)
         robot_api.asyncio = _AsyncioShim(self.clock)
         robot_api.load_tricks = made
-        robot_api.load_skate = lambda: skate
+        robot_api.load_skate_safe = lambda: (skate, skate_error)
         names = (set(robot_api.LEG_CONTROLLERS) | {t.controller for t in made().values()}
                  | {t.walk_controller for t in made().values() if t.walks})
         if skate is not None:
@@ -1369,28 +1371,42 @@ _POLICY_CLIP = {"command_clip": {"vx": [0.0, 0.3], "vy": [0.0, 0.0], "wz": [-0.6
                 "heading_hold": {"kp": 1.0, "clip": 0.1, "yaw_threshold": 0.1, "walk_threshold": 0.05}}
 
 
+_ENTRY_KEYS = ("file", "tested", "travel_m_per_s", "turn_deg_per_s", "coast_m")  # per policy, under policies:
+
+
 def _write_skate(policy: dict | None = None, **changes) -> Path:
     """A skate folder in a fresh temp dir: skate.yaml (with changes; None leaves a key
-    out) and a policy stub (``policy`` instead of the default one)."""
-    spec = {"policy": "policy.json", "speed": 0.3, "carve": {"gentle": 0.15, "medium": 0.3, "hard": 0.5},
-            "travel_m_per_s": 0.3, "turn_deg_per_s": {"gentle": 0.7, "medium": 1.0, "hard": 1.9},
-            "coast_m": 0.3, "default_seconds": 3, "max_seconds": 5, "queue_max_seconds": 10}
-    spec.update(changes)
-    spec = {k: v for k, v in spec.items() if v is not None}
+    out) and a policy stub (``policy`` instead of the default one). The yaml selects
+    its one catalogue entry, steer_v6; changes to an entry's keys (file, tested and
+    the sim estimates) go into that entry, the rest to the top level."""
+    entry = {"file": "policy.json", "tested": "robot 2026-11-26: a test entry", "travel_m_per_s": 0.3,
+             "turn_deg_per_s": {"gentle": 0.7, "medium": 1.0, "hard": 1.9}, "coast_m": 0.3}
+    spec = {"policy": "steer_v6", "speed": 0.3, "carve": {"gentle": 0.15, "medium": 0.3, "hard": 0.5},
+            "default_seconds": 3, "max_seconds": 5, "queue_max_seconds": 10}
+    for k, v in changes.items():
+        (entry if k in _ENTRY_KEYS else spec)[k] = v
+    entry = {k: v for k, v in entry.items() if v is not None}
+    spec = {k: v for k, v in {**spec, "policies": {"steer_v6": entry}}.items() if v is not None}
+    return _write_spec(spec, policy)
+
+
+def _write_spec(spec: dict, policy: dict | list | str | None = None) -> Path:
+    """A temp skate folder with exactly this skate.yaml, and policy.json (a str is written as is)."""
     d = Path(tempfile.mkdtemp(prefix="gemini_pupper_skate_"))
     (d / "skate.yaml").write_text(yaml.safe_dump(spec))
-    (d / "policy.json").write_text(json.dumps(_POLICY_CLIP if policy is None else policy))
+    body = _POLICY_CLIP if policy is None else policy
+    (d / "policy.json").write_text(body if isinstance(body, str) else json.dumps(body))
     return d
 
 
 def _load_error(d: Path) -> str:
-    """load_skate's ValueError for a folder ("" if it loads; any other error, by name)."""
+    """load_skate's SkateConfigError for a folder ("" if it loads; any other error, by name)."""
     try:
         load_skate(d)
-    except ValueError as e:
+    except skateboard.SkateConfigError as e:
         return str(e)
     except Exception as e:
-        return f"not a ValueError: {type(e).__name__}: {e}"
+        return f"not a SkateConfigError: {type(e).__name__}: {e}"
     return ""
 
 
@@ -1434,12 +1450,12 @@ async def skate_config() -> None:
     ]:
         err = _skate_error(policy, **changes)
         check(f"{what} is refused as a ValueError, with the file", bool(err) and word in err and "skate.yaml" in err
-              and "not a ValueError" not in err, f"error: {err!r}")
+              and "not a SkateConfigError" not in err, f"error: {err!r}")
     d = _write_skate()
     (d / "skate.yaml").write_text("")
     err = _load_error(d)
     check("an empty skate.yaml is refused as a ValueError, with the file", "skate.yaml" in err
-          and "not a ValueError" not in err, f"error: {err!r}")
+          and "not a SkateConfigError" not in err, f"error: {err!r}")
     d = _write_skate()
     (d / "policy.json").unlink()
     try:
@@ -1466,8 +1482,123 @@ async def skate_config() -> None:
           skateboard.ON_BOARD_TOOLS == {"start_skating", "skate_forward", "skate_turn", "end_skating", "stop", "robot_status"})
 
 
+def _safe(d: Path):
+    """load_skate_safe for a folder, or ("raised", the error) if it raised."""
+    try:
+        return skateboard.load_skate_safe(d)
+    except Exception as e:
+        return "raised", f"{type(e).__name__}: {e}"
+
+
+async def skate_catalogue() -> None:
+    print("Skate: the policy catalogue in skate.yaml, and a bad config turns skate mode off")
+    real = load_skate()
+    check("the repo's skate/skate.yaml selects steer_v6", real is not None and real.name == "steer_v6", f"got {real}")
+    check("... its policy file is policies/split_steer_v6_max0.3_policy.json, and it is there", real is not None
+          and real.policy_path.as_posix().endswith("policies/split_steer_v6_max0.3_policy.json")
+          and real.policy_path.exists(), f"got {real and real.policy_path}")
+    check("... and it says what it has done on the robot", real is not None and real.tested.startswith("robot 2026-11-26"),
+          f"got {real and real.tested!r}")
+
+    spec = yaml.safe_load((skateboard.SKATE_DIR / "skate.yaml").read_text())
+    for name in spec["policies"]:
+        d = Path(tempfile.mkdtemp(prefix="gemini_pupper_skate_"))
+        (d / "skate.yaml").write_text(yaml.safe_dump({**spec, "policy": name}))
+        (d / "policies").symlink_to(skateboard.SKATE_DIR / "policies")
+        err = _load_error(d)
+        cfg = None if err else load_skate(d)
+        entry = spec["policies"][name]
+        check(f"the catalogue entry {name} loads when selected, and passes every check", not err and cfg is not None
+              and cfg.name == name and cfg.policy_path.exists() and cfg.policy_path.name == Path(entry["file"]).name
+              and cfg.speed <= skateboard.MAX_SPEED and cfg.carve["hard"] <= skateboard.MAX_CARVE
+              and cfg.coast_m == float(entry["coast_m"]), f"error: {err!r}; got {cfg}")
+
+    good = yaml.safe_load((_write_skate() / "skate.yaml").read_text())
+    err = _load_error(_write_spec({**good, "policy": "steer_v99"}))
+    check("a policy name that is not in the catalogue is refused, with the file, the name and the real choices",
+          "skate.yaml" in err and "steer_v99" in err and "steer_v6" in err and "not a SkateConfigError" not in err,
+          f"error: {err!r}")
+
+    entry = good["policies"]["steer_v6"]
+    old = {k: v for k, v in good.items() if k != "policies"}
+    old.update(policy="policy.json", travel_m_per_s=0.3, turn_deg_per_s=entry["turn_deg_per_s"], coast_m=0.3)
+    bad_cases = [
+        ("a skate.yaml in the old single-policy layout", _write_spec(old), "old single-policy layout"),
+        ("a missing policies map", _write_spec({k: v for k, v in good.items() if k != "policies"}), "policies"),
+        ("policies that is not a map", _write_spec({**good, "policies": ["steer_v6"]}), "policies"),
+        ("a catalogue entry that is not a map", _write_spec({**good, "policies": {"steer_v6": "policy.json"}}), "steer_v6"),
+        ("an entry without a file", _write_skate(file=None), "file"),
+        ("an entry without tested", _write_skate(tested=None), "tested"),
+        ("a policy file that is not there", _write_skate(file="gone.json"), "gone.json"),
+        ("a policy file that is not JSON", _write_skate(policy="{not json"), "policy.json"),
+        ("a policy JSON that is a list", _write_skate(policy=[1, 2]), "policy.json"),
+        ("a heading_hold that is not a mapping", _write_skate(policy={**_POLICY_CLIP, "heading_hold": [0.1]}),
+         "heading_hold"),
+        ("carve: 0.3, not a mapping", _write_skate(carve=0.3), "carve"),
+        ("turn_deg_per_s: 2, not a mapping", _write_skate(turn_deg_per_s=2), "turn_deg_per_s"),
+        ("a policy name that is not text", _write_spec({**good, "policy": ["steer_v6"]}), "policy"),
+        ("a skate.yaml that is not YAML", None, "skate.yaml"),
+    ]
+    for i, (what, d, word) in enumerate(bad_cases):
+        if d is None:
+            d = _write_skate()
+            (d / "skate.yaml").write_text("policy: [unclosed\n")
+            bad_cases[i] = (what, d, word)
+        err = _load_error(d)
+        check(f"{what} is a SkateConfigError naming the file and the key", bool(err) and "skate.yaml" in err
+              and word in err and "not a SkateConfigError" not in err, f"error: {err!r}")
+
+    empty = Path(tempfile.mkdtemp(prefix="gemini_pupper_noskate_"))
+    check("load_skate_safe: no skate.yaml is (None, None), skate mode not installed", _safe(empty) == (None, None),
+          f"got {_safe(empty)}")
+    got = _safe(_write_skate())
+    check("load_skate_safe: a good skate.yaml is (config, None)", isinstance(got[0], SkateConfig) and got[1] is None,
+          f"got {got}")
+    for what, d, _ in bad_cases + [("a policy name not in the catalogue", _write_spec({**good, "policy": "steer_v99"}), "")]:
+        got = _safe(d)
+        check(f"load_skate_safe: {what} is (None, the message), and nothing raised", got[0] is None
+              and isinstance(got[1], str) and "skate.yaml" in got[1], f"got {got}")
+
+    check("not_installed_message(None) is the not-installed text",
+          skateboard.not_installed_message(None) == skateboard.NOT_INSTALLED, skateboard.not_installed_message(None))
+    msg = skateboard.not_installed_message("skate.yaml: policy 'x' is not one of steer_v6")
+    check("not_installed_message(error) says skate mode is off because of the config, and quotes the error",
+          msg == "skate mode is off on this robot because its config has an error (skate.yaml: policy 'x' is not one"
+                 " of steer_v6), so Pupper can't skate", msg)
+
+    error = _safe(_write_spec({**good, "policy": "steer_v99"}))[1]
+    rig = Rig(skate_error=error)
+    try:
+        check("a robot with a broken skate config starts, with skate mode off and the error kept",
+              rig.ts.skate is None and rig.ts.skate_error == error and SKATE_CONTROLLER not in rig.ts.leg_controllers,
+              f"skate {rig.ts.skate}; skate_error {getattr(rig.ts, 'skate_error', 'missing')!r}")
+        check("... and it logs the error", any(r.levelno >= logging.ERROR and error in r.getMessage()
+                                               for r in rig.records), [r.getMessage() for r in rig.records][-5:])
+        decls = {d["name"]: d for d in tools.declarations(rig.ts)}
+        text = decls.get("skate_forward", {}).get("description", "")
+        check("... the skate tools' descriptions say why skate mode is off", "config has an error" in text
+              and "{skate}" not in text, text)
+        await rig.call("lie_down")
+        res = await rig.call("start_skating", placed=True)
+        check("... start_skating answers with the config error", not res.ok
+              and res.message == skateboard.not_installed_message(error), f"got {res}")
+        res = await rig.call("skate_forward")
+        check("... and so does skate_forward", not res.ok and res.message == skateboard.not_installed_message(error),
+              f"got {res}")
+        res = await rig.call("stand_up")
+        check("... while stand_up still works", res.ok and rig.ts.state_now == LOCOMOTION, f"got {res}")
+        start = len(rig.robot.twists())
+        res = await rig.call("move", direction="forward", duration=1.0)
+        if unwritten(res):
+            skip(f"{unwritten(res)} is not written yet (the move tool)")
+        else:
+            check("... and so does walking (move)", res.ok and walk_twists_since(rig, start), f"got {res}")
+    finally:
+        rig.close()
+
+
 def fixture_skate() -> SkateConfig:
-    return SkateConfig(policy_path=Path("skate.json"), speed=0.3, carve={"gentle": 0.15, "medium": 0.3, "hard": 0.5},
+    return SkateConfig(name="steer_v6", tested="robot 2026-11-26: a test entry", policy_path=Path("skate.json"), speed=0.3, carve={"gentle": 0.15, "medium": 0.3, "hard": 0.5},
                        travel_m_per_s=0.3, turn_deg_per_s={"gentle": 0.7, "medium": 1.0, "hard": 1.9}, coast_m=0.3,
                        default_seconds=3.0, max_seconds=5.0, queue_max_seconds=10.0)
 
@@ -1956,7 +2087,7 @@ GROUPS = {
     "todo1": todo1, "todo2": todo2, "todo3": todo3, "todo4": todo4, "todo5": todo5, "todo6": todo6,
     "todo7": todo7, "todo8": todo8, "todo9": todo9, "todo10": todo10, "todo11": todo11, "robot": provided,
     "optional_jump": optional_jump, "skate_config": skate_config, "skate_robot": skate_robot,
-    "skate_tools": skate_tools, "skate_guards": skate_guards,
+    "skate_tools": skate_tools, "skate_guards": skate_guards, "skate_catalogue": skate_catalogue,
 }
 OPT_IN = {"optional_jump"}  # run only when asked for by name
 PARTS = {
@@ -1966,7 +2097,7 @@ PARTS = {
     "part4": ["todo7", "todo8"],
     "part5": ["todo9", "todo10"],
     "part7": ["todo11"],
-    "skate": ["skate_config", "skate_robot", "skate_tools", "skate_guards"],
+    "skate": ["skate_config", "skate_catalogue", "skate_robot", "skate_tools", "skate_guards"],
 }
 
 

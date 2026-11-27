@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from robot_api import CALL_STOPS, Result, Robot
-from skateboard import ON_BOARD_MESSAGE, ON_BOARD_TOOLS, SKATING
+from skateboard import ON_BOARD_MESSAGE, ON_BOARD_TOOLS, SKATING, not_installed_message
 
 log = logging.getLogger("tools")
 
@@ -118,7 +118,8 @@ def _describe(text: str, robot: Robot) -> str:
     if "{actions}" in text:
         text = text.replace("{actions}", _action_list(robot))
     if "{skate}" in text:
-        text = text.replace("{skate}", robot.skate.describe() if robot.skate else "(No skate policy is installed yet.)")
+        off = not_installed_message(robot.skate_error)  # not installed, or skate.yaml has an error
+        text = text.replace("{skate}", robot.skate.describe() if robot.skate else f"({off[0].upper()}{off[1:]}.)")
     return text
 
 
