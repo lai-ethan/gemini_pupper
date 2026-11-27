@@ -2147,8 +2147,11 @@ async def skate_guards() -> None:
         await tools.call(rig.ts, "skate_forward", {"seconds": 5})
         for _ in range(40):
             await _real_sleep(0)
-        rig.robot.send("/emergency_stop", _DataMsg())
-        await rig.settle()
+        riding = bool(_ride_twists(rig, len(rig.robot.twists()) - 1))
+        stopped, tail = await _gamepad_estop(rig)
+        check(f"the gamepad e-stop while riding: the ride ends within {ESTOP_TAIL_S:g} s of it (at most {ESTOP_TAIL_N}"
+              " commands, none after the stop's zero or the switch-off), and the queue is empty",
+              riding and stopped, f"riding {riding}; {tail}")
         check("the gamepad e-stop while riding relaxes the motors: the skate controller is off",
               rig.ts.state_now == robot_api.MOTORS_IDLE and rig.ts.state_after_queue == robot_api.MOTORS_IDLE
               and not rig.robot.active() & rig.ts.leg_controllers,
@@ -2412,6 +2415,36 @@ async def _ride_mid(rig: Rig, tool: str, args: dict) -> None:
         await _real_sleep(0)
 
 
+ESTOP_TAIL_S = 0.2  # the e-stop is scheduled on the event loop, so a ride mid-loop may send a command or two first
+ESTOP_TAIL_N = 4
+
+
+async def _gamepad_estop(rig: Rig) -> tuple[bool, str]:
+    """Press the gamepad e-stop while riding. Returns (ok, what happened): ok if the ride ended within
+    ESTOP_TAIL_S of the press (at most ESTOP_TAIL_N moving commands, none after the skate controller
+    was switched off or after the first zero command), and the queue was empty once the motors relaxed."""
+    mark, t0 = len(rig.robot.twists()), rig.clock.now
+    rig.robot.send("/emergency_stop", _DataMsg())
+    for _ in range(10_000):
+        if rig.ts.state_now == robot_api.MOTORS_IDLE and not rig.robot.active() & rig.ts.leg_controllers:
+            break
+        await _real_sleep(0)
+    await _real_sleep(0)
+    cleared = rig.ts.commands.empty() and (rig.ts.current is None or rig.ts.current.done())
+    await rig.settle()
+    after = rig.robot.twists()[mark:]
+    moving = [(i, t) for i, (t, m) in enumerate(after) if abs(m.linear.x) + abs(m.linear.y) + abs(m.angular.z) > 1e-9]
+    first_zero = next((i for i, (t, m) in enumerate(after)
+                       if abs(m.linear.x) + abs(m.linear.y) + abs(m.angular.z) <= 1e-9), None)
+    off = next((t for t in rig.robot.deactivations(SKATE_CONTROLLER) if t >= t0), None)
+    tail = max((t - t0 for _, t in moving), default=0.0)
+    ok = (len(moving) <= ESTOP_TAIL_N and tail <= ESTOP_TAIL_S + 1e-9 and first_zero is not None
+          and all(i < first_zero for i, _ in moving) and off is not None and all(t <= off for _, t in moving) and cleared)
+    return ok, (f"{len(moving)} moving commands after the e-stop, the last {tail:.2f} s after it; first zero command"
+                f" {'#' + str(first_zero) if first_zero is not None else 'never'}; {SKATE_CONTROLLER} switched off"
+                f" {f'{off - t0:.2f} s after it' if off is not None else 'never'}; queue empty once relaxed: {cleared}")
+
+
 def _rides(twists) -> list[tuple[float, float]]:
     """Each run of non-zero speed commands, as (start, end): end is the next zero command
     (inf if none came, so a ride left running counts as too long)."""
@@ -2473,6 +2506,18 @@ async def _demo(cfg: SkateConfig) -> None:
         check(f"{p} 4. ... and its reply gives turn_deg_per_s gentle x 3 ({degrees})", degrees in res.message
               and "Estimate" in res.message, res.message, passes=degrees)
 
+        # 4b. A hard carve at a time that is not the default.
+        mark = len(rig.robot.twists())
+        res = await rig.call("skate_turn", direction="right", sharpness="hard", seconds=4)
+        ride = _rides(rig.robot.twists()[mark:])
+        degrees = f"about {cfg.travel_m_per_s * 4:.1f} m forward, curving right by about {cfg.turn_deg_per_s['hard'] * 4:.0f} degrees"
+        check(f"{p} 4. skate_turn right hard 4 s rides 4 s, carving at -{cfg.carve['hard']:g} rad/s", res.ok and len(ride) == 1
+              and abs(ride[0][1] - ride[0][0] - 4) < 0.06
+              and all(abs(m.angular.z + cfg.carve["hard"]) < 1e-3 for _, m in _ride_twists(rig, mark)),
+              f"got {res}; rides {ride}")
+        check(f"{p} 4. ... and its reply gives travel x 4 and turn_deg_per_s hard x 4 ({degrees})", degrees in res.message,
+              res.message, passes=degrees)
+
         # 5. "Stop" in the middle of a ride.
         mark = len(rig.robot.twists())
         await _ride_mid(rig, "skate_forward", {"seconds": 5})
@@ -2488,10 +2533,11 @@ async def _demo(cfg: SkateConfig) -> None:
 
         # 6. The gamepad e-stop while riding, then back on.
         await _ride_mid(rig, "skate_forward", {"seconds": 5})
-        rig.robot.send("/emergency_stop", _DataMsg())
-        await rig.settle()
+        stopped, tail = await _gamepad_estop(rig)
         check(f"{p} 6. gamepad e-stop while riding: motors relaxed", rig.ts.state_now == robot_api.MOTORS_IDLE
               and not rig.robot.active() & rig.ts.leg_controllers, f"active {rig.robot.active()}")
+        check(f"{p} 6. ... the ride ends within {ESTOP_TAIL_S:g} s of the e-stop (at most {ESTOP_TAIL_N} commands, none"
+              " after the stop's zero or the switch-off), and the queue is empty", stopped, tail)
         res = await rig.call("stand_up")
         check(f"{p} 6. ... stand_up is refused (still on the board)", not res.ok and "skateboard" in res.message
               and not rig.robot.active() & rig.ts.leg_controllers, f"got {res}")
@@ -2525,11 +2571,14 @@ async def _demo(cfg: SkateConfig) -> None:
         # 8. Every command sent while on the board stayed inside the limits.
         sent = [m for _, m in rig.robot.twists()]
         rides = _rides(rig.robot.twists())
-        check(f"{p} 8. no command was over 0.3 m/s or a yaw of 0.5 rad/s, or sideways",
-              bool(sent) and all(m.linear.x <= 0.3 + 1e-9 and abs(m.angular.z) <= 0.5 + 1e-6 and m.linear.y == 0 for m in sent),
-              f"max vx {max(m.linear.x for m in sent):g}; max |wz| {max(abs(m.angular.z) for m in sent):g}")
-        check(f"{p} 8. ... no ride lasted over 5 s, and each ended with a zero command",
-              len(rides) == 5 and all(end - start <= 5.0 + 1e-6 for start, end in rides),
+        check(f"{p} 8. every command was forward at {skateboard.MAX_SPEED:g} m/s at most (never reverse), with a yaw of"
+              f" {skateboard.MAX_CARVE:g} rad/s at most, never sideways",
+              bool(sent) and all(-1e-9 <= m.linear.x <= skateboard.MAX_SPEED + 1e-9
+                                 and abs(m.angular.z) <= skateboard.MAX_CARVE + 1e-6 and m.linear.y == 0 for m in sent),
+              f"vx from {min(m.linear.x for m in sent):g} to {max(m.linear.x for m in sent):g};"
+              f" max |wz| {max(abs(m.angular.z) for m in sent):g}")
+        check(f"{p} 8. ... no ride lasted over {skateboard.MAX_COMMAND_S:g} s, and each ended with a zero command",
+              len(rides) == 6 and all(end - start <= skateboard.MAX_COMMAND_S + 1e-6 for start, end in rides),
               f"rides (s): {[round(end - start, 2) for start, end in rides]}")
     except Exception as e:  # noqa: BLE001
         check(f"{p} the demo ran to the end", False, f"raised {type(e).__name__}: {e}")
@@ -2540,7 +2589,9 @@ async def _demo(cfg: SkateConfig) -> None:
 async def skate_demo() -> None:
     print("Skate: the live demo, scripted, for every policy in skate/skate.yaml")
     spec = yaml.safe_load((skateboard.SKATE_DIR / "skate.yaml").read_text())
-    for name in spec["policies"]:
+    names = list((spec or {}).get("policies") or {})
+    check("the repo's skate.yaml lists at least one policy to run the demo with", bool(names), f"policies: {names}")
+    for name in names:
         d = Path(tempfile.mkdtemp(prefix="gemini_pupper_skate_"))
         (d / "skate.yaml").write_text(yaml.safe_dump({**spec, "policy": name}))
         (d / "policies").symlink_to(skateboard.SKATE_DIR / "policies")
